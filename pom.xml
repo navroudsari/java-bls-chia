@@ -54,7 +54,7 @@
         <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcprov-jdk18on</artifactId>
-            <version>1.75</version>
+            <version>1.78</version>
         </dependency>
 
         <!-- https://mvnrepository.com/artifact/org.apache.tuweni/tuweni-bytes -->
