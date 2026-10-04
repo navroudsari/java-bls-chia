@@ -1,0 +1,3 @@
+[submodule "native/blst"]
+	path = native/blst
+	url = https://github.com/supranational/blst.git

@@ -1,209 +1,151 @@
 # BLS Signatures Java
 
-An implementation of BLS signatures using [blst](https://github.com/supranational/blst) Java bindings based on [Chia's implementation](https://github.com/Chia-Network/bls-signatures). This library implements the Minimal Pubkey Size variant.
+An implementation of BLS signatures on BLS12-381 (minimal-pubkey-size variant) compatible with Chia: [chia-bls](https://github.com/Chia-Network/chia_rs/tree/main/crates/chia-bls) (Rust) and [bls-signatures](https://github.com/Chia-Network/bls-signatures) (C++). It calls [blst](https://github.com/supranational/blst) **v0.3.17** directly through Java's Foreign Function & Memory API; there are no other runtime dependencies.
 
 🚫 Security Disclaimer: This code has not undergone formal security audits. I started this as a hobbyist project primarily for learning and exploration. Please use at your own risk.
 
-It's currently using [Consensys' jblst](https://github.com/Consensys/jblst), a packaged cross-platform version of blst for java.  You may prefer to build the [blst jar](https://github.com/supranational/blst/tree/master/bindings/java) from source yourself if you don't trust their package.
-
 Feedback and PR's are very welcome.
 
-# Usage
+## Requirements
 
-## Get instance of scheme
+- Java 22 or newer.
+- Native access enabled for the library, otherwise the JVM prints a warning (and future JDKs will refuse):
+  - classpath: `java --enable-native-access=ALL-UNNAMED ...`
+  - module path: `java --enable-native-access=surf.superhighway.bls ...`
+- A supported platform: Linux, macOS or Windows on x86_64 or aarch64 (Windows: x86_64). The jar built by CI bundles a native library for each. To use a library you built yourself, set `-Dsurf.superhighway.bls.library.path=/path/to/libchiabls.so`.
 
-```java
-SignatureScheme basicScheme = BasicSignatureScheme.getInstance();
-SignatureScheme augScheme = MessageAugmentationSignatureScheme.getInstance();
-ProofOfPossessionSignatureScheme popScheme = ProofOfPossessionSignatureScheme.getInstance();
-```
-
-## Sign message using message augmentation signature scheme
-
-```java
-// Fetch signature scheme instance
-SignatureScheme augScheme = MessageAugmentationSignatureScheme.getInstance();
-
-// Generate a keypair
-PrivateKey privateKey = MessageAugmentationSignatureScheme.keygen(secureRandom.generateSeed(32));
-PublicKey publicKey = augScheme.privateKeyToPublicKey(privateKey);
-
-// A message to sign
-Bytes messageBytes = Bytes.secure("Hello, World!".getBytes());
-
-// Sign message with private key
-Signature signature = augScheme.sign(privateKey, messageBytes);
-
-// Verify message with public key and signature
-boolean verified = augScheme.verify(publicKey, messageBytes, signature);
-```
-
-## Verify ownership of public key using Proof of Possession (POP) Signature Scheme
-```java
-// Fetch POP signature scheme instance
-ProofOfPossessionSignatureScheme popScheme = ProofOfPossessionSignatureScheme.getInstance();
-
-// Party A generates keypair and shares their public key
-PrivateKey partyAPrivateKey = ProofOfPossessionSignatureScheme.keygen(secureRandom.generateSeed(32));
-PublicKey partyAPublicKey = popScheme.privateKeyToPublicKey(privateKey);
-
-// Party A creates a signature to prove they own the shared public key
-Signature partyAProofOfPossessionSignature = popScheme.popProve(privateKey);
-
-// Party B verifies that Party A does indeed own the shared public key using the created signature
-boolean doTheyOwnThePublicKey = popScheme.popVerify(partyAPublicKey, partyAProofOfPossessionSignature);
-```
-
-# Run Tests
+## Build
 
 ```shell
-mvn test
+git clone --recurse-submodules https://github.com/navroudsari/java-bls-chia.git
+cd java-bls-chia
+mvn verify
 ```
 
-```shell
-[INFO] Results:
-[INFO] 
-[INFO] Tests run: 36, Failures: 0, Errors: 0, Skipped: 0
-[INFO] 
-[INFO] ------------------------------------------------------------------------
-[INFO] BUILD SUCCESS
-[INFO] ------------------------------------------------------------------------
-[INFO] Total time:  1.264 s
-```
+`mvn` compiles blst plus [`native/chia_bls.c`](native/chia_bls.c) for the host with [`native/build.sh`](native/build.sh) (needs a C compiler; on Windows, MSYS2 MinGW). blst is built in portable mode, selecting CPU features at runtime, as chia-bls does. CI ([`.github/workflows/build.yml`](.github/workflows/build.yml)) builds and tests every platform and packages one jar containing all native libraries.
 
-# Examples Adapted From Chia's BLS Signatures Repo
-## Creating keys and signatures example
+## Usage
 
 ```java
-// Example seed, used to generate private key. Always use a secure RNG
-// with sufficient entropy to generate a seed (at least 32 bytes).
-Bytes seed = Bytes.of(
-    0, 50, 6, 244, 24, 199, 1, 25, 52, 88, 192, 19, 
-    18, 12, 89, 6, 220, 18, 102, 58, 209, 82, 12, 
-    62, 89, 110, 182, 9, 44, 20, 254, 22);
+MessageAugmentationSignatureScheme aug = MessageAugmentationSignatureScheme.getInstance();
 
-PrivateKey privateKey = MessageAugmentationSignatureScheme.keygen(seed);
-PublicKey publicKey = augScheme.privateKeyToPublicKey(privateKey);
+byte[] seed = new byte[32];
+new SecureRandom().nextBytes(seed);
 
-Bytes message = Bytes.of(1, 2, 3, 4, 5);  // Message is passed in as a bytes
-Signature signature = augScheme.sign(privateKey, message);
+try (PrivateKey privateKey = PrivateKey.fromSeed(seed)) {    // destroyed (zeroized) on close
+    Arrays.fill(seed, (byte) 0);
 
-// Verify the signature
-boolean ok = augScheme.verify(publicKey, message, signature);
+    PublicKey publicKey = privateKey.getPublicKey();
+    byte[] message = {1, 2, 3, 4, 5};
+    Signature signature = aug.sign(privateKey, message);
+
+    boolean ok = aug.verify(publicKey, message, signature);
+}
 ```
 
-## Serializing keys and signatures to bytes example
+### Serialization
 
 ```java
-Bytes32 privateKeyBytes = privateKey.serialize();
-Bytes48 publicKeyBytes = publicKey.serialize();
-Bytes signatureBytes = signature.serialize();
+byte[] publicKeyBytes = publicKey.toBytes();    // 48 bytes, compressed
+byte[] signatureBytes = signature.toBytes();    // 96 bytes, compressed
+byte[] privateKeyBytes = privateKey.toBytes();  // 32 bytes, big-endian; wipe when done
 
-System.out.println(privateKeyBytes.toHexString());  // 32 bytes printed in hex
-System.out.println(publicKeyBytes.toHexString());   // 48 bytes printed in hex
-System.out.println(signatureBytes.toHexString());   // 96 bytes printed in hex
+PublicKey pk = PublicKey.fromBytes(publicKeyBytes);   // checks encoding and G1 subgroup
+Signature sig = Signature.fromBytes(signatureBytes);  // checks encoding and G2 subgroup
+PrivateKey sk = PrivateKey.fromBytes(privateKeyBytes); // must be < group order
+PrivateKey sk2 = PrivateKey.fromBytesModOrder(privateKeyBytes);
 ```
 
-## Loading keys and signatures from bytes example
+`fromBytesUnchecked` skips the subgroup check for trusted input; every verification method still rejects keys and signatures outside their subgroup.
+
+### Aggregation
 
 ```java
-// Takes Bytes32
-PrivateKey privateKey = PrivateKey.fromBytes(privateKeyBytes);
-PrivateKey privateKey = PrivateKey.fromBytesModOrder(privateKeyBytes);
+Signature aggregate = aug.aggregateSignatures(List.of(signature1, signature2));
+boolean ok = aug.aggregateVerify(List.of(publicKey1, publicKey2), List.of(message1, message2), aggregate);
 
-// Takes Bytes48
-PublicKey publicKey = PublicKey.fromBytes(publicKeyBytes);
-
-// Takes Bytes of length 96
-Signature signature = Signature.fromBytes(signatureBytes);
+// Arbitrary trees of aggregates
+Signature aggregateFinal = aug.aggregateSignatures(List.of(aggregate, signature3));
 ```
 
-## Create aggregate signatures example
+### Proof of possession
 
 ```java
-// Update seed to generate privateKey1
-seed = Bytes.concatenate(Bytes.of(1), seed.slice(1, seed.size() - 1));
-PrivateKey privateKey1 = MessageAugmentationSignatureScheme.keygen(seed);
+ProofOfPossessionSignatureScheme pop = ProofOfPossessionSignatureScheme.getInstance();
 
-// Update seed again to generate privateKey2
-seed = Bytes.concatenate(Bytes.of(2), seed.slice(1, seed.size() - 1));
-PrivateKey privateKey2 = MessageAugmentationSignatureScheme.keygen(seed);
+// A proof of possession MUST be passed around with each public key and checked.
+Signature proof = pop.popProve(privateKey);
+boolean owned = pop.popVerify(publicKey, proof);
 
-// Create message to sign
-Bytes message2 = Bytes.of(1, 2, 3, 4, 5, 6, 7);
-
-// Generate first sigmature
-PublicKey publicKey1 = privateKey1.getPublicKey();
-Signature signature1 = augScheme.sign(privateKey1, message);
-
-// Generate second sigmature
-PublicKey publicKey2 = privateKey2.getPublicKey();
-Signature signature2 = augScheme.sign(privateKey2, message2);
-
-// Signatures can be non-interactively combined by anyone
-Signature aggSig = augScheme.aggregateSignatures(List.of(signature1, signature2));
-
-boolean ok = augScheme.aggregateVerify(List.of(publicKey1, publicKey2), List.of(message, message2), aggSig)
+// Then many signatures on the same message verify quickly
+boolean ok = pop.fastAggregateVerify(List.of(publicKey1, publicKey2, publicKey3), message, aggregate);
 ```
 
-## Arbitrary trees of aggregates example
+### HD keys
 
 ```java
-Bytes seed = Bytes.concatenate(Bytes.of(3), seed.slice(1, seed.size() - 1));
-PrivateKey privateKey3 = MessageAugmentationSignatureScheme.keygen(seed);
-PublicKey publicKey3 = privateKey3.getPublicKey();
-Bytes message3 = Bytes.of(100, 2, 254, 88, 90, 45, 23);
-Signature signature3 = augScheme.sign(privateKey3, message3);
+// Hardened (EIP-2333 Lamport + KeyGen, as Chia does); no public derivation
+PrivateKey child = master.deriveHardened(152);
 
-Signature aggSigFinal = augScheme.aggregateSignatures(List.of(aggSig, signature3));
-boolean ok = augScheme.aggregateVerify(List.of(publicKey1, publicKey2, publicKey3), List.of(message, message2, message3), aggSigFinal);
+// Unhardened (BIP32 style): public keys can be derived from public keys
+PrivateKey childU = master.deriveUnhardened(22);
+PublicKey childUPk = master.getPublicKey().deriveUnhardened(22);   // == childU.getPublicKey()
+
+// Chia wallet paths (chia-bls derive_keys.rs)
+PrivateKey wallet = HDKeys.masterToWalletUnhardened(master, 0);
+PublicKey walletPk = HDKeys.masterToWalletUnhardened(master.getPublicKey(), 0);
 ```
 
-## Very fast verification with Proof of Possession scheme example
+Indices are unsigned 32-bit values passed as `int` (e.g. `0xFFFFFFFF`).
 
-```java
-// If the same message is signed, you can use Proof of Posession (PopScheme) for efficiency
-// A proof of possession MUST be passed around with the PK to ensure security.
-Signature popSignature1 = popScheme.sign(privateKey1, message);
-Signature popSignature2 = popScheme.sign(privateKey2, message);
-Signature popSignature3 = popScheme.sign(privateKey3, message);
-Signature pop1 = popScheme.popProve(privateKey1);
-Signature pop2 = popScheme.popProve(privateKey2);
-Signature pop3 = popScheme.popProve(privateKey3);
+[`ReadmeExampleTest`](src/test/java/surf/superhighway/bls/ReadmeExampleTest.java) runs the full walkthrough.
 
-boolean ok = popScheme.popVerify(publicKey1, pop1);
-boolean ok = popScheme.popVerify(publicKey2, pop2);
-boolean ok = popScheme.popVerify(publicKey3, pop3);
-Signature popAggregatedSignature = popScheme.aggregateSignatures(List.of(popSignature1, popSignature2, popSignature3));
+## Memory handling of secret keys
 
-boolean ok = popScheme.fastAggregateVerify(List.of(publicKey1, publicKey2, publicKey3), message, popAggregatedSignature);
+Java cannot guarantee that secrets are erased, because the garbage collector copies heap objects. So private keys never live on the Java heap:
 
-// Aggregate public key, indistinguishable from a single public key
-PublicKey popAggregatedPk = publicKey1.add(publicKey2).add(publicKey3);
-boolean ok = popScheme.verify(popAggregatedPk, message, popAggregatedSignature);
+- Each key's scalar is stored in native memory, in slabs that are locked into RAM (`mlock` / `VirtualLock`) so they aren't swapped out, and on Linux excluded from core dumps. Locking is best effort and depends on OS limits (`ulimit -l`); `PrivateKey.isMemoryLocked()` reports whether it worked.
+- Signing, derivation and aggregation run in native code directly on that memory. Hardened derivation's intermediate Lamport secrets (about 16 KB per step) are computed and scrubbed inside blst.
+- `destroy()` / `close()` zeroizes the key immediately, and any later use throws `IllegalStateException`. Keys that are never destroyed are zeroized by a `Cleaner` once unreachable, at a time of the GC's choosing.
+- `toString()` never shows key material, and `equals` compares in constant time.
 
-// Aggregate private keys
-PrivateKey aggregatedPrivateKey = PrivateKey.aggregate(List.of(privateKey1, privateKey2, privateKey3));
-boolean ok = popAggregatedSignature, popScheme.sign(aggregatedPrivateKey, message);
-```
+Remaining exposure you control: the `byte[]` arguments and results of `fromSeed`, `fromBytes` and `toBytes` are ordinary heap arrays, so wipe them after use. Heap dumps, debuggers and anything else with access to process memory can still read live keys.
 
-## HD keys using [EIP-2333](https://github.com/ethereum/EIPs/pull/2333) example
+## Compatibility with Chia
 
-```java
-// You can derive 'child' keys from any key, to create arbitrary trees. 4 byte indeces are used.
-// Hardened (more secure, but no parent pk -> child pk)
-PrivateKey masterPrivateKey = MessageAugmentationSignatureScheme.keygen(seed);
+- Hardened derivation, unhardened derivation, key generation, signatures and fingerprints match Chia's test vectors (see [`HDKeysTest`](src/test/java/surf/superhighway/bls/HDKeysTest.java) and [`ChiaVectorsTest`](src/test/java/surf/superhighway/bls/ChiaVectorsTest.java)).
+- Validation follows chia-bls, where it's stricter than the C++ library: `aggregateVerify` rejects any public key or signature outside its subgroup, and public key encodings must be canonical.
+- chia-bls (Rust) implements only the augmentation scheme. The basic and proof-of-possession schemes and `Signature.deriveUnhardened` follow Chia's C++ library and Python reference.
 
-// Unhardened (less secure, but can go from parent pk -> child pk), BIP32 style
-PublicKey masterPublicKey = masterPrivateKey.getPublicKey();
-PrivateKey childUnhardenedPrivateKey = augScheme.deriveChildPrivateKeyUnhardened(masterPrivateKey, UInt32.valueOf(22));
-PrivateKey grandchildUnhardenedPrivateKey = augScheme.deriveChildPrivateKeyUnhardened(childUnhardenedPrivateKey, UInt32.valueOf(0));
-PublicKey childUnhardenedPublicKey = augScheme.deriveChildPublicKeyUnhardened(masterPublicKey, UInt32.valueOf(22));
-PublicKey grandchildUnhardenedPublicKey = augScheme.deriveChildPublicKeyUnhardened(childUnhardenedPublicKey, UInt32.valueOf(0));
-```
+## Changes from 0.1
 
+0.2 replaces jblst and Apache Tuweni and fixes several bugs, so the API has changed:
 
-## BLST license
+| 0.1 | 0.2 |
+|---|---|
+| `Bytes`, `Bytes32`, `Bytes48`, `UInt32` | `byte[]`, `int` |
+| `XxxSignatureScheme.keygen(seed)` | `PrivateKey.fromSeed(seed)` |
+| `serialize()` | `toBytes()` |
+| `scheme.deriveChildPrivateKey(sk, i)` | `sk.deriveHardened(i)` |
+| `scheme.deriveChildPrivateKeyUnhardened(sk, i)` | `sk.deriveUnhardened(i)` |
+| `scheme.deriveChildPublicKeyUnhardened(pk, i)` | `pk.deriveUnhardened(i)` |
+| `scheme.deriveChildSignatureUnhardened(sig, i)` | `sig.deriveUnhardened(i)` |
+| `PublicKey.ZERO`, `Signature.ZERO` | `PublicKey.infinity()`, `Signature.infinity()` |
+| `PrivateKey.ZERO` | `PrivateKey.fromBytes(new byte[32])` |
+| `generate()` | `generator()` |
+| `multiply(PublicKey)` | `scalarMultiply(byte[] bigEndianInteger)` |
+| `getFingerprintAsHexString()` etc. | `getFingerprint()` (unsigned, as `long`) |
 
-BLST is used with the
-[Apache 2.0 license](https://github.com/supranational/blst/blob/master/LICENSE)
+Fixed in 0.2:
+- `deriveChildPrivateKey` returned the parent key and overwrote the caller's parent with a child computed using the wrong KeyGen version.
+- Unhardened derivation modified the caller's public key or signature, and could corrupt the shared `ZERO` constants.
+- Unhardened signature derivation used the wrong byte order compared with Chia.
+- `aggregateVerify` accepted public keys outside G1.
+- `Signature.fromBytes` accepted points outside G2.
+- `PrivateKey.fromBytes` accepted the group order itself.
+- `PrivateKey.toString()` printed the secret key.
+- `PublicKey.equals(null)` threw an exception.
+
+## License
+
+Apache 2.0. blst is used under the [Apache 2.0 license](https://github.com/supranational/blst/blob/master/LICENSE).

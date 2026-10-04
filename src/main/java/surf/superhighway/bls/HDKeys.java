@@ -1,109 +1,98 @@
 package surf.superhighway.bls;
 
-import org.apache.tuweni.bytes.Bytes;
-import org.apache.tuweni.bytes.Bytes32;
-import org.apache.tuweni.units.bigints.UInt32;
-import surf.superhighway.util.Util;
-import supranational.blst.SecretKey;
-
 import java.util.Objects;
 
-public class HDKeys {
+/**
+ * Chia wallet derivation paths, matching chia-bls {@code derive_keys.rs}.
+ *
+ * <p>Single-step derivation lives on the key types: {@link PrivateKey#deriveHardened},
+ * {@link PrivateKey#deriveUnhardened}, {@link PublicKey#deriveUnhardened} and
+ * {@link Signature#deriveUnhardened}. Intermediate private keys created along a path are
+ * destroyed before these methods return.
+ */
+public final class HDKeys {
 
-    public static final int HASH_LENGTH = 32;
+    private static final int PURPOSE = 12381;
+    private static final int CHIA = 8444;
+    private static final int WALLET = 2;
+    private static final int POOL_SINGLETON = 5;
+    private static final int POOL_AUTHENTICATION = 6;
 
     private HDKeys() {
-        throw new AssertionError("HDKeys class should not be instantiated.");
+    }
+
+    public static PrivateKey masterToWalletHardenedIntermediate(PrivateKey master) {
+        return deriveHardened(master, PURPOSE, CHIA, WALLET);
+    }
+
+    public static PrivateKey masterToWalletHardened(PrivateKey master, int index) {
+        return deriveHardened(master, PURPOSE, CHIA, WALLET, index);
+    }
+
+    public static PrivateKey masterToWalletUnhardenedIntermediate(PrivateKey master) {
+        return deriveUnhardened(master, PURPOSE, CHIA, WALLET);
+    }
+
+    public static PrivateKey masterToWalletUnhardened(PrivateKey master, int index) {
+        return deriveUnhardened(master, PURPOSE, CHIA, WALLET, index);
+    }
+
+    public static PublicKey masterToWalletUnhardenedIntermediate(PublicKey master) {
+        return deriveUnhardened(master, PURPOSE, CHIA, WALLET);
+    }
+
+    public static PublicKey masterToWalletUnhardened(PublicKey master, int index) {
+        return deriveUnhardened(master, PURPOSE, CHIA, WALLET, index);
+    }
+
+    public static PrivateKey masterToPoolSingleton(PrivateKey master, int poolWalletIndex) {
+        return deriveHardened(master, PURPOSE, CHIA, POOL_SINGLETON, poolWalletIndex);
     }
 
     /**
-     * Generates a private key based on the provided seed as per the version 3 key generation method.
-     *
-     * @param seed The seed from which the private key is derived. Must be at least 32 bytes.
-     * @return The generated {@link PrivateKey} object.
-     * @throws IllegalArgumentException if seed is null or less than 32 bytes in length.
+     * @throws IllegalArgumentException if either index is not in [0, 10000)
      */
-    public static PrivateKey keygen(Bytes seed) {
-
-        if (Objects.isNull(seed)) {
-            throw new IllegalArgumentException("seed cannot be null");
+    public static PrivateKey masterToPoolAuthentication(PrivateKey master, int poolWalletIndex, int index) {
+        if (poolWalletIndex < 0 || poolWalletIndex >= 10000 || index < 0 || index >= 10000) {
+            throw new IllegalArgumentException("poolWalletIndex and index must be in [0, 10000)");
         }
-
-        if (seed.size() < HASH_LENGTH) {
-            throw new IllegalArgumentException("Seed size must be at least " + HASH_LENGTH + " bytes");
-        }
-
-        SecretKey blstSecretKey = new SecretKey();
-        blstSecretKey.keygen_v3(seed.toArray());
-
-        return PrivateKey.fromBytes(Bytes32.secure(blstSecretKey.to_bendian()));
+        return deriveHardened(master, PURPOSE, CHIA, POOL_AUTHENTICATION, poolWalletIndex * 10000 + index);
     }
 
-    /**
-     * Computes a Lamport public key based on the provided parent private key and an index.
-     *
-     * @param parentPrivateKey The parent private key used in generating the Lamport key.
-     * @param index            The index used as a salt for key derivation.
-     * @return The computed Lamport {@link PublicKey}.
-     * @throws IllegalArgumentException if parentPk or index is null.
-     */
-    public static Bytes32 parentSKToLamportPK(PrivateKey parentPrivateKey, UInt32 index) {
-
-        if (Objects.isNull(parentPrivateKey)) {
-            throw new IllegalArgumentException("parentPk cannot be null");
+    /** Follows a hardened path, destroying each intermediate key. */
+    public static PrivateKey deriveHardened(PrivateKey key, int... path) {
+        Objects.requireNonNull(key, "key");
+        PrivateKey current = key;
+        for (int index : path) {
+            PrivateKey next = current.deriveHardened(index);
+            if (current != key) {
+                current.destroy();
+            }
+            current = next;
         }
-        if (Objects.isNull(index)) {
-            throw new IllegalArgumentException("index cannot be null");
-        }
-
-        UInt32 outputLength = UInt32.valueOf(HASH_LENGTH * 255);
-        Bytes salt = Util.intTofourBytes(index);
-        Bytes ikm = parentPrivateKey.serialize();
-
-        Bytes notIkm = ikm.not();
-        Bytes lamport0 = HKDF.ExtractExpand(salt, ikm, Bytes.EMPTY, outputLength);
-        Bytes lamport1 = HKDF.ExtractExpand(salt, notIkm, Bytes.EMPTY, outputLength);
-
-        assert (4 == salt.size());
-        assert (HASH_LENGTH == ikm.size());
-        assert (HASH_LENGTH == notIkm.size());
-        assert (HASH_LENGTH * 255 == lamport0.size());
-        assert (HASH_LENGTH * 255 == lamport1.size());
-
-        Bytes lamportPK = Bytes.EMPTY;
-        for (int i = 0; i < 255; i++) {
-            int startIndex = i * HASH_LENGTH;
-            lamportPK = Bytes.concatenate(lamportPK, Util.hash256(lamport0.slice(startIndex, HASH_LENGTH)));
-        }
-
-        for (int i = 0; i < 255; i++) {
-            int startIndex = i * HASH_LENGTH;
-            lamportPK = Bytes.concatenate(lamportPK, Util.hash256(lamport1.slice(startIndex, HASH_LENGTH)));
-        }
-
-        return Util.hash256(lamportPK);
+        return current == key ? key.copy() : current;
     }
 
-    /**
-     * Derives a child private key from the given parent private key and index using the Lamport scheme.
-     *
-     * @param parentPrivateKey The parent private key used for child key derivation.
-     * @param index            The index to assist in child key derivation.
-     * @return The derived child {@link PrivateKey}.
-     * @throws IllegalArgumentException if parentPrivateKey or index is null.
-     */
-    public static PrivateKey deriveChildSk(final PrivateKey parentPrivateKey, UInt32 index) {
-
-        if (Objects.isNull(parentPrivateKey)) {
-            throw new IllegalArgumentException("parentPrivateKey cannot be null");
+    /** Follows an unhardened path, destroying each intermediate key. */
+    public static PrivateKey deriveUnhardened(PrivateKey key, int... path) {
+        Objects.requireNonNull(key, "key");
+        PrivateKey current = key;
+        for (int index : path) {
+            PrivateKey next = current.deriveUnhardened(index);
+            if (current != key) {
+                current.destroy();
+            }
+            current = next;
         }
-        if (Objects.isNull(index)) {
-            throw new IllegalArgumentException("index cannot be null");
-        }
-
-        Bytes32 lamportPk = parentSKToLamportPK(parentPrivateKey, index);
-
-        return keygen(lamportPk);
+        return current == key ? key.copy() : current;
     }
 
+    public static PublicKey deriveUnhardened(PublicKey key, int... path) {
+        Objects.requireNonNull(key, "key");
+        PublicKey current = key;
+        for (int index : path) {
+            current = current.deriveUnhardened(index);
+        }
+        return current;
+    }
 }

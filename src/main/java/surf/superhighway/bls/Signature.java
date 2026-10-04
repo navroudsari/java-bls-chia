@@ -1,212 +1,208 @@
 package surf.superhighway.bls;
 
-import org.apache.tuweni.bytes.Bytes;
-import supranational.blst.P2;
-import supranational.blst.Scalar;
-
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.util.Arrays;
+import java.util.HexFormat;
+import java.util.List;
 import java.util.Objects;
 
-public class Signature {
+import static java.lang.foreign.ValueLayout.JAVA_BYTE;
+
+/**
+ * A BLS12-381 G2 element: a signature in the minimal-pubkey-size variant.
+ *
+ * <p>Instances are immutable and thread-safe. Serialized form is the 96-byte compressed
+ * encoding used by Chia ({@code G2Element} in chia-bls).
+ */
+public final class Signature {
 
     public static final int SIZE = 96;
-    public static final Signature ZERO = new Signature(new P2());
-    final P2 point;
 
-    Signature(P2 point) {
+    private static final Signature INFINITY = new Signature(newPoint());
+    private static final Signature GENERATOR = new Signature(copyOf(Blst.p2Generator()));
+
+    // blst_p2 in a GC-managed off-heap arena; never written after construction.
+    private final MemorySegment point;
+    private final byte[] bytes;
+
+    private Signature(MemorySegment point) {
         this.point = point;
+        this.bytes = new byte[SIZE];
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(SIZE);
+            Blst.p2Compress(out, point);
+            MemorySegment.copy(out, JAVA_BYTE, 0, bytes, 0, SIZE);
+        }
     }
 
-    public static Signature generate() {
-        return new Signature(P2.generator());
+    private Signature(MemorySegment point, byte[] canonicalBytes) {
+        this.point = point;
+        this.bytes = canonicalBytes;
     }
 
-    /**
-     * Creates a Signature instance from the given byte array representation.
-     *
-     * @param bytes The byte representation of the signature.
-     * @return The constructed Signature instance.
-     * @throws IllegalArgumentException if the byte representation is not of the expected size, is null, or is invalid.
-     */
-    public static Signature fromBytes(Bytes bytes) {
-        if (Objects.isNull(bytes)) {
-            throw new IllegalArgumentException("Bytes representation cannot be null.");
-        }
-        if (bytes.size() != SIZE) {
-            throw new IllegalArgumentException("Byte representation size must be " + SIZE);
-        }
-
-        P2 point;
-        try {
-            point = new P2(bytes.toArray());
-        } catch (RuntimeException ex) {
-            throw new IllegalArgumentException("Signature is invalid");
-        }
-
+    static Signature fromPoint(MemorySegment point) {
         return new Signature(point);
     }
 
-    /**
-     * Serializes the public key to its compressed form.
-     *
-     * @return The serialized byte representation of the public key.
-     * @throws IllegalArgumentException if the public key's point is null.
-     */
-    public Bytes serialize() {
-        if (Objects.isNull(point)) {
-            throw new IllegalArgumentException("Public key's point cannot be null.");
-        }
+    static MemorySegment newPoint() {
+        return Arena.ofAuto().allocate(Blst.P2_SIZE, Blst.ALIGNMENT);
+    }
 
-        return Bytes.wrap(point.compress());
+    private static MemorySegment copyOf(MemorySegment source) {
+        MemorySegment copy = newPoint();
+        MemorySegment.copy(source, 0, copy, 0, Blst.P2_SIZE);
+        return copy;
+    }
+
+    /** The point at infinity (identity element); the aggregate of no signatures. */
+    public static Signature infinity() {
+        return INFINITY;
+    }
+
+    /** The G2 generator. */
+    public static Signature generator() {
+        return GENERATOR;
     }
 
     /**
-     * Negates the current Signature.
-     * <p>
-     * This method computes the negation of the elliptic curve point associated with the signature.
-     * </p>
+     * Parses and validates a compressed signature: the encoding must be canonical and the point
+     * must be the identity or lie in the G2 subgroup, as Chia's {@code G2Element::FromBytes} and
+     * chia-bls {@code Signature::from_bytes} require.
      *
-     * @return A new Signature object representing the negated value of the current signature.
-     * @throws IllegalArgumentException if the internal point representation of the signature is null.
+     * @throws IllegalArgumentException if the bytes are not a valid signature
      */
-    public Signature negate() {
-        if (point == null) {
-            throw new IllegalArgumentException("Signature's point representation cannot be null.");
+    public static Signature fromBytes(byte[] bytes) {
+        Signature signature = fromBytesUnchecked(bytes);
+        if (!signature.isValid()) {
+            throw new IllegalArgumentException("Signature is not in the G2 subgroup");
         }
-
-        P2 negatedPoint = point.dup().neg();
-
-        return new Signature(negatedPoint);
+        return signature;
     }
 
     /**
-     * Adds the given Signature's point to the current Signature's point and returns a new Signature.
+     * Parses a compressed signature, checking the encoding and that the point is on the curve,
+     * but <em>not</em> that it lies in the G2 subgroup. Verification methods in this library
+     * reject signatures outside G2 regardless.
      *
-     * @param other The other Signature to add to the current one.
-     * @return A new Signature resulting from the addition.
-     * @throws IllegalArgumentException if the provided Signature is null.
+     * @throws IllegalArgumentException if the bytes are not a canonical encoding of a curve point
      */
-    public Signature add(Signature other) {
-        if (Objects.isNull(other)) {
-            throw new IllegalArgumentException("The provided Signature cannot be null.");
+    public static Signature fromBytesUnchecked(byte[] bytes) {
+        Bytes.requireLength(bytes, SIZE, "signature");
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment in = arena.allocateFrom(JAVA_BYTE, bytes);
+            MemorySegment affine = arena.allocate(Blst.P2_AFFINE_SIZE, Blst.ALIGNMENT);
+            int error = Blst.p2Uncompress(affine, in);
+            if (error != Blst.BLST_SUCCESS) {
+                throw new IllegalArgumentException("Signature is invalid (blst error " + error + ")");
+            }
+            MemorySegment point = newPoint();
+            Blst.p2FromAffine(point, affine);
+            return new Signature(point, bytes.clone());
         }
-
-        if (Objects.isNull(point) || Objects.isNull(other.point)) {
-            throw new IllegalArgumentException("The provided Signature or its internal point representation cannot be null.");
-        }
-
-        P2 resultPoint = point.dup().add(other.point);
-        return new Signature(resultPoint);
     }
 
-    /**
-     * Multiplies the current Signature with another given Signature.
-     * <p>
-     * This method computes the elliptic curve point multiplication between the current signature's point
-     * and the serialized form of the provided signature's point.
-     * </p>
-     *
-     * @param other The Signature to be multiplied with the current Signature.
-     * @return A new Signature object representing the product of the two Signatures.
-     * @throws IllegalArgumentException if the provided Signature is null or if its internal point representation is null.
-     */
-    public Signature multiply(Signature other) {
-
-        if (Objects.isNull(other)) {
-            throw new IllegalArgumentException("The provided Signature cannot be null.");
+    /** Sums signatures. An empty list yields {@link #infinity()}. */
+    public static Signature aggregate(List<Signature> signatures) {
+        Objects.requireNonNull(signatures, "signatures");
+        MemorySegment sum = newPoint();
+        for (Signature signature : signatures) {
+            Objects.requireNonNull(signature, "signatures contains null");
+            Blst.p2AddOrDouble(sum, sum, signature.point);
         }
-
-        if (Objects.isNull(point) || Objects.isNull(other.point)) {
-            throw new IllegalArgumentException("The provided Signature or its internal point representation cannot be null.");
-        }
-
-        Scalar otherPointScalar = new Scalar();
-        otherPointScalar.from_bendian(other.point.serialize());
-        P2 resultPoint = point.dup().mult(otherPointScalar);
-
-        return new Signature(resultPoint);
+        return new Signature(sum);
     }
 
-
-    /**
-     * Creates a deep copy of the current Signature instance.
-     *
-     * @return A new Signature instance that is a copy of the current one.
-     * @throws IllegalArgumentException if the internal point is null.
-     */
-    public Signature copy() {
-        if (Objects.isNull(point)) {
-            throw new IllegalArgumentException("Internal point of the Signature cannot be null.");
-        }
-
-        return new Signature(point.dup());
+    /** The 96-byte compressed encoding. */
+    public byte[] toBytes() {
+        return bytes.clone();
     }
 
-    /**
-     * Determines if the current point is a valid element of the G2 elliptic curve group.
-     * <p>
-     * A point is considered valid if it belongs to the G2 group or if it represents the
-     * point at infinity (based on historical compatibility with older Relic versions).
-     * </p>
-     *
-     * @return true if the point is valid, false otherwise.
-     */
+    /** True if this is the identity or lies in the G2 subgroup (Chia treats infinity as valid). */
     public boolean isValid() {
+        return Blst.p2IsInf(point) || Blst.p2InG2(point);
+    }
 
-        // https://github.com/Chia-Network/bls-signatures/blob/7f10927337a1903f8295f68e6d16b6b3c478667a/src/elements.cpp#L297
-        // Infinity was considered a valid G2Element in older Relic versions
-        // on which chia bls signatures library was previously based.
-        // For historical compatibility this behavior is maintained.
-        if (point.is_inf()) {
-            return true;
-        }
+    public boolean isInfinity() {
+        return Blst.p2IsInf(point);
+    }
 
-        return point.in_group();
+    public Signature add(Signature other) {
+        Objects.requireNonNull(other, "other");
+        MemorySegment sum = newPoint();
+        Blst.p2AddOrDouble(sum, point, other.point);
+        return new Signature(sum);
+    }
+
+    public Signature negate() {
+        MemorySegment negated = copyOf(point);
+        Blst.p2Cneg(negated, true);
+        return new Signature(negated);
     }
 
     /**
-     * Returns a hexadecimal string representation of the serialized signature.
-     *
-     * @return A string in hexadecimal format representing the serialized signature.
-     * @throws IllegalArgumentException if the serialized data is null.
+     * Multiplies this point by an integer given as big-endian bytes of any length (reduced
+     * modulo the group order), as chia-bls {@code Signature::scalar_multiply} does.
      */
-    @Override
-    public String toString() {
-        Bytes serializedData = serialize();
-        if (Objects.isNull(serializedData)) {
-            throw new IllegalArgumentException("Serialization of the signature resulted in a null value.");
+    public Signature scalarMultiply(byte[] bigEndianInteger) {
+        Objects.requireNonNull(bigEndianInteger, "bigEndianInteger");
+        MemorySegment product = newPoint();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment scalar = arena.allocate(Blst.SCALAR_SIZE, Blst.ALIGNMENT);
+            MemorySegment in = arena.allocate(Math.max(bigEndianInteger.length, 1));
+            MemorySegment.copy(bigEndianInteger, 0, in, JAVA_BYTE, 0, bigEndianInteger.length);
+            Blst.scalarFromBeBytes(scalar, in, bigEndianInteger.length);
+            Blst.p2Mult(product, point, scalar, 256);
         }
-
-        return serializedData.toHexString();
+        return new Signature(product);
     }
 
-
     /**
-     * Determines whether the given object is equal to this Signature.
+     * Unhardened child derivation of a G2 element, matching Chia's C++
+     * {@code HDKeys::DeriveChildG2Unhardened} and Python {@code derive_child_g2_unhardened}:
+     * {@code child = parent + G2 * int(SHA256(parent || index))} with the digest read big-endian.
+     * (chia-bls in Rust has no G2 derivation.)
      *
-     * @param obj The object to be compared.
-     * @return True if the given object is a Signature and its underlying point matches this Signature's point, false otherwise.
-     * @throws IllegalArgumentException if the point of this signature is null.
+     * @param index child index, interpreted as an unsigned 32-bit integer
      */
+    public Signature deriveUnhardened(int index) {
+        byte[] digest = Bytes.sha256(bytes, Bytes.uint32(index));
+        MemorySegment child = newPoint();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment scalar = arena.allocate(Blst.SCALAR_SIZE, Blst.ALIGNMENT);
+            Blst.scalarFromBeBytes(scalar, arena.allocateFrom(JAVA_BYTE, digest), digest.length);
+            Blst.p2Mult(child, Blst.p2Generator(), scalar, 256);
+            Blst.p2AddOrDouble(child, child, point);
+        }
+        return new Signature(child);
+    }
+
+    MemorySegment point() {
+        return point;
+    }
+
+    MemorySegment toAffine(Arena arena) {
+        MemorySegment affine = arena.allocate(Blst.P2_AFFINE_SIZE, Blst.ALIGNMENT);
+        Blst.p2ToAffine(affine, point);
+        return affine;
+    }
+
     @Override
     public boolean equals(Object obj) {
-        if (Objects.isNull(point)) {
-            throw new IllegalArgumentException("The point of this signature is null.");
+        if (this == obj) {
+            return true;
         }
-
-        if (!(obj instanceof Signature otherSignature)) {
-            return false;
-        }
-
-        return point.is_equal(otherSignature.point);
+        return obj instanceof Signature other && Blst.p2IsEqual(point, other.point);
     }
 
     @Override
     public int hashCode() {
-        int result = 17;
-        result = 31 * result + (point != null ? Arrays.hashCode(point.serialize()) : 0);
-        return result;
+        return Arrays.hashCode(bytes);
     }
 
-
+    /** Hex of the compressed encoding. */
+    @Override
+    public String toString() {
+        return HexFormat.of().formatHex(bytes);
+    }
 }

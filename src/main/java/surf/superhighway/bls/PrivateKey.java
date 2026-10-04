@@ -1,260 +1,306 @@
 package surf.superhighway.bls;
 
-import org.apache.tuweni.bytes.Bytes;
-import org.apache.tuweni.bytes.Bytes32;
-import org.apache.tuweni.bytes.Bytes48;
-import supranational.blst.P1;
-import supranational.blst.P2;
-import supranational.blst.Scalar;
-import supranational.blst.SecretKey;
-
-import java.math.BigInteger;
+import javax.security.auth.Destroyable;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.lang.ref.Cleaner;
+import java.lang.ref.Reference;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
-@SuppressWarnings("SpellCheckingInspection")
-public class PrivateKey {
+import static java.lang.foreign.ValueLayout.JAVA_BYTE;
+
+/**
+ * A BLS12-381 secret key (a scalar modulo the group order r).
+ *
+ * <h2>Memory handling</h2>
+ * The scalar is stored outside the Java heap, in memory that is locked against swapping where
+ * the OS allows it (see {@link #isMemoryLocked()}), so the garbage collector never copies it.
+ * Every operation on the key (signing, derivation, aggregation) runs in native code on that
+ * memory directly. Call {@link #destroy()} (or use try-with-resources) as soon as a key is no
+ * longer needed: its memory is zeroized immediately and any further use throws
+ * {@link IllegalStateException}. Keys that become unreachable without being destroyed are
+ * zeroized by a {@link Cleaner}, at a time the garbage collector chooses.
+ *
+ * <p>The byte-array entry points ({@link #fromBytes}, {@link #fromSeed}, {@link #toBytes}) are
+ * the only places secret material crosses the Java heap; callers own those arrays and should
+ * overwrite them (e.g. {@code Arrays.fill(bytes, (byte) 0)}) when done.
+ *
+ * <p>Instances are thread-safe. {@link #toString()} never reveals key material, and
+ * {@link #equals} compares in constant time.
+ */
+public final class PrivateKey implements Destroyable, AutoCloseable {
 
     public static final int SIZE = 32;
-    public static final PrivateKey ZERO = new PrivateKey(new SecretKey());
 
-    private static final BigInteger BLS12_381_r = new BigInteger("73EDA753299D7D483339D80809A1D80553BDA402FFFE5BFEFFFFFFFF00000001", 16);
-    final SecretKey blstSecretKey;
+    /** Seeds shorter than this are rejected, as in Chia and draft-irtf-cfrg-bls-signature. */
+    public static final int MIN_SEED_SIZE = 32;
 
-    private PrivateKey(SecretKey blstSecretKey) {
-        this.blstSecretKey = blstSecretKey;
+    private static final Cleaner CLEANER = Cleaner.create();
+    private static final AtomicLong SEQUENCE = new AtomicLong();
+
+    private final SecureMemory.Slot slot;
+    private final Cleaner.Cleanable cleanable;
+    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+    private final long sequence = SEQUENCE.getAndIncrement();   // lock ordering in equals()
+    private final PublicKey publicKey;
+    private volatile boolean destroyed;                        // written under the write lock
+
+    private PrivateKey(SecureMemory.Slot slot) {
+        MemorySegment point = PublicKey.newPoint();
+        Blst.skToPkInG1(point, slot.segment());
+        this.publicKey = PublicKey.fromPoint(point);
+        this.slot = slot;
+        // Registered last: if anything above throws, create() frees the slot instead.
+        this.cleanable = CLEANER.register(this, new Release(slot));
+    }
+
+    /** Cleaner action; must not reference the PrivateKey. */
+    private record Release(SecureMemory.Slot slot) implements Runnable {
+        @Override
+        public void run() {
+            SecureMemory.free(slot);
+        }
+    }
+
+    private static PrivateKey create(Consumer<MemorySegment> initializer) {
+        SecureMemory.Slot slot = SecureMemory.allocate();
+        try {
+            initializer.accept(slot.segment());
+            return new PrivateKey(slot);
+        } catch (RuntimeException | Error e) {
+            SecureMemory.free(slot);
+            throw e;
+        }
     }
 
     /**
-     * Constructs a private key from the given byte array.
+     * Generates a key from a seed using KeyGen from draft-irtf-cfrg-bls-signature-03, as Chia
+     * does ({@code AugSchemeMPL.key_gen}, chia-bls {@code SecretKey::from_seed}).
      *
-     * @param bytes    The byte array to convert into a PrivateKey.
-     *                 The size of this array should be at least SIZE bytes.
-     * @param modOrder If true, the method will first interpret the bytes as a scalar (mod order)
-     *                 before constructing the private key. Otherwise, it will use the bytes as-is.
-     * @return A new instance of PrivateKey.
-     * @throws IllegalArgumentException if the size of the byte array is less than SIZE or if the provided byte array is null.
-     * @throws AssertionError           if the size of the provided byte sequence is less than the expected size.
+     * @param seed at least {@value #MIN_SEED_SIZE} bytes of high-entropy secret material
      */
-    private static PrivateKey fromBytes(Bytes32 bytes, boolean modOrder) {
-
-        if (Objects.isNull(bytes)) {
-            throw new IllegalStateException("bytes cannot be null");
+    public static PrivateKey fromSeed(byte[] seed) {
+        Objects.requireNonNull(seed, "seed");
+        if (seed.length < MIN_SEED_SIZE) {
+            throw new IllegalArgumentException("Seed must be at least " + MIN_SEED_SIZE + " bytes");
         }
-
-        if (bytes.size() < SIZE) {
-            throw new AssertionError("Seed size must be at least " + SIZE + " bytes");
-        }
-
-        SecretKey blstSecretKey = new SecretKey();
-        if (modOrder) {
-            Scalar scalar = new Scalar().from_bendian(bytes.toArray());
-            blstSecretKey.from_bendian(scalar.to_bendian());
-        } else {
-            blstSecretKey.from_bendian(bytes.toArray());
-        }
-
-        if (!keyCheck(Bytes32.secure(blstSecretKey.to_bendian()))) {
-            throw new IllegalStateException("PrivateKey byte data must be less than the group order");
-        }
-
-        return new PrivateKey(blstSecretKey);
+        return create(sk -> SecureMemory.withWipedBuffer(seed.length, buffer -> {
+            MemorySegment.copy(seed, 0, buffer, JAVA_BYTE, 0, seed.length);
+            Blst.keygenV3(sk, buffer, seed.length);
+            return null;
+        }));
     }
 
     /**
-     * Constructs a private key instance from the provided byte sequence.
+     * Parses a 32-byte big-endian key. The all-zero key is accepted (as Chia does); any other
+     * value must be less than the group order.
      *
-     * <p>This function creates a private key without adjusting its value modulo
-     * the order of the curve's base point. As a result, the input byte sequence
-     * is directly used as the private key.</p>
-     *
-     * @param bytes The byte sequence to derive the PrivateKey from.
-     * @return A new instance of PrivateKey.
+     * @throws IllegalArgumentException if the value is not less than the group order
      */
-    public static PrivateKey fromBytes(Bytes32 bytes) {
-        return fromBytes(bytes, false);
-    }
-
-    /**
-     * Constructs a private key instance from the provided byte sequence,
-     * ensuring that the resultant private key value is taken modulo the order of
-     * the curve's base point.
-     *
-     * <p>This ensures that the resultant private key value remains within the
-     * valid range of the elliptic curve.</p>
-     *
-     * @param bytes The byte sequence to derive the PrivateKey from.
-     * @return A new instance of PrivateKey.
-     */
-    public static PrivateKey fromBytesModOrder(Bytes32 bytes) {
-        return fromBytes(bytes, true);
-    }
-
-    /**
-     * Aggregates a list of private keys into a single private key.
-     *
-     * @param privateKeys The list of private keys to be aggregated.
-     * @return The aggregated PrivateKey.
-     * @throws IllegalArgumentException if the provided list is null or empty,
-     *                                  or if any private key in the list is null or has a null blstSecretKey.
-     * @throws VerifyError              if the number of private keys is zero.
-     */
-    public static PrivateKey aggregate(final List<PrivateKey> privateKeys) {
-        if (Objects.isNull(privateKeys) || privateKeys.isEmpty()) {
-            throw new IllegalArgumentException("List of private keys cannot be null or empty.");
-        }
-
-        Scalar keyData = new Scalar();
-        for (PrivateKey privateKey : privateKeys) {
-            if (Objects.isNull(privateKey) || Objects.isNull(privateKey.blstSecretKey)) {
-                throw new IllegalArgumentException("Invalid private key found in the list. Neither a private key nor its underlying representation can be null.");
+    public static PrivateKey fromBytes(byte[] bytes) {
+        Bytes.requireLength(bytes, SIZE, "private key");
+        boolean zero = Bytes.allZero(bytes, 0);
+        return create(sk -> {
+            // blst_scalar is little-endian; reverse straight into secure memory.
+            for (int i = 0; i < SIZE; i++) {
+                sk.set(JAVA_BYTE, i, bytes[SIZE - 1 - i]);
             }
-            keyData.add(privateKey.blstSecretKey);
-        }
+            if (!zero && !Blst.skCheck(sk)) {
+                throw new IllegalArgumentException("PrivateKey byte data must be less than the group order");
+            }
+        });
+    }
 
-        return PrivateKey.fromBytes(Bytes32.secure(keyData.to_bendian()), false);
+    /** Parses 32 big-endian bytes as an integer and reduces it modulo the group order. */
+    public static PrivateKey fromBytesModOrder(byte[] bytes) {
+        Bytes.requireLength(bytes, SIZE, "private key");
+        return create(sk -> SecureMemory.withWipedBuffer(SIZE, buffer -> {
+            MemorySegment.copy(bytes, 0, buffer, JAVA_BYTE, 0, SIZE);
+            Blst.scalarFromBeBytes(sk, buffer, SIZE);
+            return null;
+        }));
     }
 
     /**
-     * Checks if the given key data is less than or equal to the defined BLS12-381_r value.
+     * Sums keys modulo the group order; the result's public key is the sum of the public keys.
      *
-     * @param keydata The Bytes32 representation of the key data to check.
-     * @return true if the key data is less than or equal to BLS12_381_r, false otherwise.
+     * @throws IllegalArgumentException if the list is empty
      */
-    private static boolean keyCheck(Bytes32 keydata) {
-        // Prepend a zero byte to the key data to ensure the resulting BigInteger is positive.
-        Bytes positiveBytes = Bytes.concatenate(Bytes.of(0), keydata);
-        BigInteger data = positiveBytes.toBigInteger();
-        return data.compareTo(BLS12_381_r) <= 0;
+    public static PrivateKey aggregate(List<PrivateKey> privateKeys) {
+        Objects.requireNonNull(privateKeys, "privateKeys");
+        if (privateKeys.isEmpty()) {
+            throw new IllegalArgumentException("Number of private keys must be at least 1");
+        }
+        return create(sum -> {
+            for (PrivateKey key : privateKeys) {
+                Objects.requireNonNull(key, "privateKeys contains null");
+                key.withScalar(sk -> Blst.skAddNCheck(sum, sum, sk));
+            }
+        });
+    }
+
+    /** The 32-byte big-endian encoding. The caller owns the returned array and should wipe it. */
+    public byte[] toBytes() {
+        return withScalar(sk -> {
+            byte[] out = new byte[SIZE];
+            for (int i = 0; i < SIZE; i++) {
+                out[i] = sk.get(JAVA_BYTE, SIZE - 1 - i);
+            }
+            return out;
+        });
+    }
+
+    /** The corresponding public key. Remains available after {@link #destroy()}. */
+    public PublicKey getPublicKey() {
+        return publicKey;
     }
 
     /**
-     * Derives the corresponding PublicKey from this PrivateKey.
+     * Hardened child derivation, matching Chia ({@code AugSchemeMPL.derive_child_sk}, chia-bls
+     * {@code SecretKey::derive_hardened}): EIP-2333's Lamport construction followed by KeyGen v3.
+     * Runs entirely in native code; intermediate secrets are scrubbed before returning.
      *
-     * @return The associated {@link PublicKey}.
-     * @throws IllegalStateException if the underlying private key representation is null.
+     * @param index child index, interpreted as an unsigned 32-bit integer
      */
-    protected PublicKey getPublicKey() {
-        if (Objects.isNull(blstSecretKey)) {
-            throw new IllegalStateException("Underlying secret key cannot be null");
-        }
-        P1 point = new P1(blstSecretKey);
-
-        return PublicKey.fromBytes(Bytes48.wrap(point.compress()));
+    public PrivateKey deriveHardened(int index) {
+        return create(child -> withScalar(parent -> {
+            Blst.chiaDeriveChildSk(child, parent, index);
+            return null;
+        }));
     }
 
     /**
-     * Generates a signature representation using the underlying secret key.
-     * <p>
-     * This method compresses the secret key into a byte array and then constructs a
-     * {@link Signature} from those bytes.
-     * </p>
+     * Unhardened (BIP32-style) child derivation, matching chia-bls
+     * {@code SecretKey::derive_unhardened}. The child's public key equals
+     * {@code getPublicKey().deriveUnhardened(index)}.
      *
-     * @return the generated {@link Signature} object.
-     * @throws IllegalStateException if the underlying secret key is null.
+     * @param index child index, interpreted as an unsigned 32-bit integer
      */
-    public Signature getSignature() {
-        if (Objects.isNull(blstSecretKey)) {
-            throw new IllegalStateException("Underlying secret key cannot be null");
-        }
-        P2 point = new P2(blstSecretKey);
-
-        return Signature.fromBytes(Bytes.wrap(point.compress()));
+    public PrivateKey deriveUnhardened(int index) {
+        byte[] digest = Bytes.sha256(publicKey.bytesUnsafe(), Bytes.uint32(index));
+        return create(child -> {
+            try (Arena arena = Arena.ofConfined()) {
+                Blst.scalarFromBeBytes(child, arena.allocateFrom(JAVA_BYTE, digest), digest.length);
+            }
+            withScalar(parent -> Blst.skAddNCheck(child, child, parent));
+        });
     }
 
-    /**
-     * Signs the given message using the G2 curve and produces a Signature.
-     *
-     * @param msg The message to be signed.
-     * @param dst Domain separation tag, used to separate the context of different signature uses.
-     * @return The produced {@link Signature}.
-     * @throws IllegalArgumentException if the message, dst, or underlying private key representation is null.
-     */
-    public Signature signG2(Bytes msg, String dst) {
-
-        if (Objects.isNull(msg)) {
-            throw new IllegalArgumentException("Message to be signed cannot be null.");
-        }
-        if (Objects.isNull(dst)) {
-            throw new IllegalArgumentException("Domain separation tag cannot be null.");
-        }
-        if (Objects.isNull(blstSecretKey)) {
-            throw new IllegalArgumentException("Underlying secret key representation cannot be null.");
-        }
-
-        P2 point = P2.generator().hash_to(msg.toArray(), dst, null);
-        point = point.sign_with(blstSecretKey);
-        return new Signature(point);
-    }
-
-    /**
-     * Creates a deep copy of this PrivateKey instance.
-     *
-     * @return A new PrivateKey instance with a copy of the underlying secret key.
-     * @throws IllegalArgumentException if the internal representation (blstSecretKey) of the private key is null.
-     */
+    /** An independent copy that can be destroyed separately. */
     public PrivateKey copy() {
-        if (Objects.isNull(blstSecretKey)) {
-            throw new IllegalArgumentException("Internal representation of the private key cannot be null.");
-        }
-        return new PrivateKey(blstSecretKey.dup());
+        return create(target -> withScalar(source -> {
+            MemorySegment.copy(source, 0, target, 0, SIZE);
+            return null;
+        }));
     }
 
-    /**
-     * Serializes the private key into a big-endian representation wrapped in a Bytes32 object.
-     *
-     * @return The serialized representation of the private key.
-     * @throws IllegalArgumentException if the private key data (blstSecretKey) is null.
-     */
-    public Bytes32 serialize() {
-        if (Objects.isNull(blstSecretKey)) {
-            throw new IllegalArgumentException("Private key data cannot be null.");
+    /** Signs {@code message} hashed to G2 with domain separation tag {@code dst}. */
+    Signature sign(byte[] message, byte[] dst) {
+        MemorySegment signature = Signature.newPoint();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment msg = arena.allocate(Math.max(message.length, 1));
+            MemorySegment.copy(message, 0, msg, JAVA_BYTE, 0, message.length);
+            MemorySegment tag = arena.allocateFrom(JAVA_BYTE, dst);
+            MemorySegment hash = arena.allocate(Blst.P2_SIZE, Blst.ALIGNMENT);
+            Blst.hashToG2(hash, msg, message.length, tag, dst.length);
+            withScalar(sk -> {
+                Blst.signPkInG1(signature, hash, sk);
+                return null;
+            });
         }
-        return Bytes32.secure(blstSecretKey.to_bendian());
+        return Signature.fromPoint(signature);
     }
 
-    /**
-     * Returns the hexadecimal string representation of the serialized private key.
-     *
-     * @return The hex string representation of the private key.
-     * @throws IllegalArgumentException if the serialized private key is null.
-     */
+    private <T> T withScalar(Function<MemorySegment, T> action) {
+        Lock read = lock.readLock();
+        read.lock();
+        try {
+            if (destroyed) {
+                throw new IllegalStateException("PrivateKey has been destroyed");
+            }
+            return action.apply(slot.segment());
+        } finally {
+            read.unlock();
+            Reference.reachabilityFence(this);
+        }
+    }
+
+    /** True if the key's memory is locked against swapping (best effort; depends on OS limits). */
+    public boolean isMemoryLocked() {
+        return slot.slab().isLocked();
+    }
+
+    /** Zeroizes the key immediately. Idempotent; later operations throw IllegalStateException. */
     @Override
-    public String toString() {
-        Bytes32 serializedKey = serialize();
-        if (Objects.isNull(serializedKey)) {
-            throw new IllegalArgumentException("Serialized private key cannot be null.");
+    public void destroy() {
+        Lock write = lock.writeLock();
+        write.lock();
+        try {
+            if (!destroyed) {
+                destroyed = true;
+                cleanable.clean();
+            }
+        } finally {
+            write.unlock();
         }
-        return serializedKey.toHexString();
     }
 
+    @Override
+    public boolean isDestroyed() {
+        return destroyed;
+    }
 
-    /**
-     * Determines whether the given object is equivalent to this PrivateKey.
-     *
-     * @param obj The object to compare against.
-     * @return true if the provided object is a PrivateKey and has the same serialization
-     * and associated public key; false otherwise.
-     */
+    /** Same as {@link #destroy()}. */
+    @Override
+    public void close() {
+        destroy();
+    }
+
+    /** Constant-time comparison. A destroyed key is only equal to itself. */
     @Override
     public boolean equals(Object obj) {
-        // Check for same object reference for a quick true result
         if (this == obj) {
             return true;
         }
-
-        // Check for appropriate type and pattern match to variable otherPrivateKey
-        if (!(obj instanceof PrivateKey otherPrivateKey)) {
+        if (!(obj instanceof PrivateKey other)) {
             return false;
         }
-
-        // Compare serialized private key and associated public keys
-        return serialize().equals(otherPrivateKey.serialize()) && Objects.equals(getPublicKey(), otherPrivateKey.getPublicKey());
+        PrivateKey first = sequence < other.sequence ? this : other;
+        PrivateKey second = first == this ? other : this;
+        Lock firstLock = first.lock.readLock();
+        Lock secondLock = second.lock.readLock();
+        firstLock.lock();
+        try {
+            secondLock.lock();
+            try {
+                if (destroyed || other.destroyed) {
+                    return false;
+                }
+                return Blst.chiaScalarEq(slot.segment(), other.slot.segment());
+            } finally {
+                secondLock.unlock();
+            }
+        } finally {
+            firstLock.unlock();
+            Reference.reachabilityFence(this);
+            Reference.reachabilityFence(other);
+        }
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(serialize(), getPublicKey());
+        return publicKey.hashCode();
     }
 
+    /** Never reveals key material. */
+    @Override
+    public String toString() {
+        return "<PrivateKey>";
+    }
 }

@@ -1,278 +1,233 @@
 package surf.superhighway.bls;
 
-import org.apache.tuweni.bytes.Bytes32;
-import org.apache.tuweni.bytes.Bytes48;
-import org.apache.tuweni.units.bigints.UInt32;
-import surf.superhighway.util.Util;
-import supranational.blst.P1;
-import supranational.blst.Scalar;
-
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.util.Arrays;
+import java.util.HexFormat;
+import java.util.List;
 import java.util.Objects;
 
-public class PublicKey {
+import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 
-    public static final PublicKey ZERO = new PublicKey(new P1());
+/**
+ * A BLS12-381 G1 element: a public key in the minimal-pubkey-size variant.
+ *
+ * <p>Instances are immutable and thread-safe. Serialized form is the 48-byte compressed
+ * encoding used by Chia ({@code G1Element} in chia-bls).
+ */
+public final class PublicKey {
 
-    final P1 point;
+    public static final int SIZE = 48;
 
-    PublicKey(P1 publicKeyPoint) {
-        this.point = publicKeyPoint;
+    private static final PublicKey INFINITY = new PublicKey(newPoint());
+    private static final PublicKey GENERATOR = new PublicKey(copyOf(Blst.p1Generator()));
+
+    // blst_p1 in a GC-managed off-heap arena; never written after construction.
+    private final MemorySegment point;
+    private final byte[] bytes;
+
+    private PublicKey(MemorySegment point) {
+        this.point = point;
+        this.bytes = new byte[SIZE];
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment out = arena.allocate(SIZE);
+            Blst.p1Compress(out, point);
+            MemorySegment.copy(out, JAVA_BYTE, 0, bytes, 0, SIZE);
+        }
     }
 
-    public static PublicKey generate() {
-        return new PublicKey(P1.generator());
+    private PublicKey(MemorySegment point, byte[] canonicalBytes) {
+        this.point = point;
+        this.bytes = canonicalBytes;
+    }
+
+    static PublicKey fromPoint(MemorySegment point) {
+        return new PublicKey(point);
+    }
+
+    static MemorySegment newPoint() {
+        return Arena.ofAuto().allocate(Blst.P1_SIZE, Blst.ALIGNMENT);
+    }
+
+    private static MemorySegment copyOf(MemorySegment source) {
+        MemorySegment copy = newPoint();
+        MemorySegment.copy(source, 0, copy, 0, Blst.P1_SIZE);
+        return copy;
+    }
+
+    /** The point at infinity (identity element). */
+    public static PublicKey infinity() {
+        return INFINITY;
+    }
+
+    /** The G1 generator. */
+    public static PublicKey generator() {
+        return GENERATOR;
     }
 
     /**
-     * Constructs a PublicKey from the given bytes.
+     * Parses and validates a compressed public key: the encoding must be canonical and the point
+     * must be the identity or lie in the G1 subgroup.
      *
-     * @param bytes The bytes to be converted to a PublicKey.
-     * @return The constructed PublicKey.
-     * @throws IllegalArgumentException If the input bytes are null or invalid for a PublicKey.
+     * @throws IllegalArgumentException if the bytes are not a valid public key
      */
-    public static PublicKey fromBytes(Bytes48 bytes) {
-        if (Objects.isNull(bytes)) {
-            throw new IllegalArgumentException("Input bytes cannot be null.");
-        }
-
-        PublicKey publicKey = new PublicKey(new P1(bytes.toArray()));
+    public static PublicKey fromBytes(byte[] bytes) {
+        PublicKey publicKey = fromBytesUnchecked(bytes);
         if (!publicKey.isValid()) {
-            throw new IllegalArgumentException("PublicKey is invalid");
+            throw new IllegalArgumentException("Public key is not in the G1 subgroup");
         }
-
         return publicKey;
     }
 
     /**
-     * Constructs a PublicKey from the given bytes without checking validity.
+     * Parses a compressed public key, checking the encoding is canonical and the point is on the
+     * curve, but <em>not</em> that it lies in the G1 subgroup. Only use this for keys from a
+     * trusted source; {@link #isValid()} performs the remaining check. Verification methods in
+     * this library reject keys outside G1 regardless.
      *
-     * @param bytes The bytes to be converted to a PublicKey.
-     * @return The constructed PublicKey.
-     * @throws IllegalArgumentException If the input bytes are null.
+     * @throws IllegalArgumentException if the bytes are not a canonical encoding of a curve point
      */
-    public static PublicKey fromBytesUnchecked(Bytes48 bytes) {
-        if (Objects.isNull(bytes)) {
-            throw new IllegalArgumentException("Input bytes cannot be null.");
+    public static PublicKey fromBytesUnchecked(byte[] bytes) {
+        Bytes.requireLength(bytes, SIZE, "public key");
+
+        // Canonical-encoding checks mirror chia-bls PublicKey::from_bytes_unchecked.
+        int first = bytes[0] & 0xff;
+        boolean zerosOnly = Bytes.allZero(bytes, 1);
+        if ((first & 0xc0) == 0xc0) {
+            if (first != 0xc0 || !zerosOnly) {
+                throw new IllegalArgumentException("Public key has a non-canonical infinity encoding");
+            }
+            return INFINITY;
+        }
+        if ((first & 0xc0) != 0x80) {
+            throw new IllegalArgumentException("Public key has invalid flag bits");
+        }
+        if (zerosOnly) {
+            throw new IllegalArgumentException("Public key has an invalid zero encoding");
         }
 
-        P1 point = new P1(bytes.toArray());
-
-        return new PublicKey(point);
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment in = arena.allocateFrom(JAVA_BYTE, bytes);
+            MemorySegment affine = arena.allocate(Blst.P1_AFFINE_SIZE, Blst.ALIGNMENT);
+            int error = Blst.p1Uncompress(affine, in);
+            if (error != Blst.BLST_SUCCESS) {
+                throw new IllegalArgumentException("Public key is invalid (blst error " + error + ")");
+            }
+            MemorySegment point = newPoint();
+            Blst.p1FromAffine(point, affine);
+            return new PublicKey(point, bytes.clone());
+        }
     }
 
-    /**
-     * Creates a copy of the current PublicKey instance.
-     *
-     * @return A new PublicKey instance that is a copy of the current one.
-     * @throws IllegalArgumentException If the internal point data is null.
-     */
-    public PublicKey copy() {
-        if (Objects.isNull(point)) {
-            throw new IllegalArgumentException("Internal point data cannot be null.");
+    /** Sums public keys. An empty list yields {@link #infinity()}. */
+    public static PublicKey aggregate(List<PublicKey> publicKeys) {
+        Objects.requireNonNull(publicKeys, "publicKeys");
+        MemorySegment sum = newPoint();
+        for (PublicKey publicKey : publicKeys) {
+            Objects.requireNonNull(publicKey, "publicKeys contains null");
+            Blst.p1AddOrDouble(sum, sum, publicKey.point);
         }
-
-        return new PublicKey(point.dup());
+        return new PublicKey(sum);
     }
 
-
-    /**
-     * Serializes the PublicKey instance into a byte representation.
-     *
-     * @return A Bytes48 representation of the PublicKey.
-     * @throws IllegalArgumentException If the internal point data is null.
-     */
-    public Bytes48 serialize() {
-        if (Objects.isNull(point)) {
-            throw new IllegalArgumentException("Internal point data cannot be null.");
-        }
-
-        return Bytes48.wrap(point.compress());
+    /** The 48-byte compressed encoding. */
+    public byte[] toBytes() {
+        return bytes.clone();
     }
 
-
-    /**
-     * Calculates the fingerprint for the PublicKey instance.
-     *
-     * @return A UInt32 representation of the fingerprint.
-     * @throws IllegalArgumentException If the serialized representation of the PublicKey is invalid.
-     */
-    public UInt32 getFingerprint() {
-        Bytes32 hash;
-        try {
-            hash = Bytes32.wrap(Util.hash256(serialize()));
-        } catch (Exception e) {
-            throw new IllegalArgumentException("Error while hashing serialized PublicKey.", e);
-        }
-
-        return Util.fourBytesToInt(hash);
-    }
-
-    /**
-     * Calculates the fingerprint for the PublicKey instance and returns it as a decimal string.
-     *
-     * @return A decimal string representation of the fingerprint.
-     * @throws IllegalArgumentException If the serialized representation of the PublicKey is invalid.
-     */
-    public String getFingerprintAsDecimalString() {
-        Bytes32 hash;
-        try {
-            hash = Bytes32.wrap(Util.hash256(serialize()));
-        } catch (Exception e) {
-            throw new IllegalArgumentException("Error while hashing serialized PublicKey.", e);
-        }
-
-        return Util.fourBytesToInt(hash).toDecimalString();
-    }
-
-    /**
-     * Calculates the fingerprint for the PublicKey instance and returns it as a hexadecimal string.
-     *
-     * @return A hexadecimal string representation of the fingerprint.
-     * @throws IllegalArgumentException If the serialized representation of the PublicKey is invalid.
-     */
-    public String getFingerprintAsHexString() {
-        Bytes32 hash;
-        try {
-            hash = Bytes32.wrap(Util.hash256(serialize()));
-        } catch (Exception e) {
-            throw new IllegalArgumentException("Error while hashing serialized PublicKey.", e);
-        }
-
-        return Util.fourBytesToInt(hash).toHexString();
-    }
-
-    /**
-     * Negates the current public key.
-     * <p>
-     * This method will negate the elliptic curve point associated with the public key,
-     * effectively computing the additive inverse on the curve.
-     * </p>
-     *
-     * @return A new PublicKey object representing the negated public key.
-     * @throws IllegalArgumentException if the internal point representation is null.
-     */
-    public PublicKey negate() {
-        if (point == null) {
-            throw new IllegalArgumentException("Public key's point representation cannot be null.");
-        }
-
-        P1 negatedPoint = point.dup();
-        negatedPoint.neg();
-
-        return new PublicKey(negatedPoint);
-    }
-
-
-    /**
-     * Adds the provided PublicKey to the current public key.
-     * <p>
-     * This method will add the elliptic curve points associated with the two public keys,
-     * effectively computing the additive combination on the curve.
-     * </p>
-     *
-     * @param other The PublicKey to add to the current public key.
-     * @return A new PublicKey object representing the sum of the two public keys.
-     * @throws IllegalArgumentException if the provided PublicKey is null or its internal point representation is null.
-     */
-    public PublicKey add(PublicKey other) {
-
-        if (Objects.isNull(other)) {
-            throw new IllegalArgumentException("The provided PublicKey cannot be null.");
-        }
-
-        if (Objects.isNull(point) || Objects.isNull(other.point)) {
-            throw new IllegalArgumentException("The provided PublicKey or its internal point representation cannot be null.");
-        }
-
-        P1 resultPoint = point.dup().add(other.point);
-
-        return new PublicKey(resultPoint);
-    }
-
-
-    /**
-     * Multiplies this PublicKey's point by another PublicKey's point.
-     *
-     * @param other The PublicKey by which this PublicKey's point will be multiplied.
-     * @return A new PublicKey instance representing the product of this PublicKey's point and the provided one.
-     * @throws IllegalArgumentException If the provided PublicKey is null.
-     */
-    public PublicKey multiply(PublicKey other) {
-        if (Objects.isNull(other)) {
-            throw new IllegalArgumentException("The provided PublicKey cannot be null.");
-        }
-
-        if (Objects.isNull(point) || Objects.isNull(other.point)) {
-            throw new IllegalArgumentException("The provided PublicKey or its internal point representation cannot be null.");
-        }
-
-        Scalar otherPointScalar = new Scalar();
-        otherPointScalar.from_bendian(other.point.serialize());
-        P1 resultPoint = point.dup().mult(otherPointScalar);
-
-        return new PublicKey(resultPoint);
-    }
-
-    /**
-     * Determines if the current point is a valid element of the G1 elliptic curve group.
-     * <p>
-     * A point is considered valid if it belongs to the G1 group or if it represents the
-     * point at infinity (based on historical compatibility with older Relic versions).
-     * </p>
-     *
-     * @return true if the point is valid, false otherwise.
-     */
+    /** True if this is the identity or lies in the G1 subgroup (Chia treats infinity as valid). */
     public boolean isValid() {
+        return Blst.p1IsInf(point) || Blst.p1InG1(point);
+    }
 
-        // https://github.com/Chia-Network/bls-signatures/blob/7f10927337a1903f8295f68e6d16b6b3c478667a/src/elements.cpp#L125
-        // Infinity was considered a valid G1Element in older Relic versions
-        // on which chia bls signatures library was previously based.
-        // For historical compatibility this behavior is maintained.
-        if (point.is_inf()) {
-            return true;
+    public boolean isInfinity() {
+        return Blst.p1IsInf(point);
+    }
+
+    public PublicKey add(PublicKey other) {
+        Objects.requireNonNull(other, "other");
+        MemorySegment sum = newPoint();
+        Blst.p1AddOrDouble(sum, point, other.point);
+        return new PublicKey(sum);
+    }
+
+    public PublicKey negate() {
+        MemorySegment negated = copyOf(point);
+        Blst.p1Cneg(negated, true);
+        return new PublicKey(negated);
+    }
+
+    /**
+     * Multiplies this point by an integer given as big-endian bytes of any length (reduced
+     * modulo the group order), as chia-bls {@code PublicKey::scalar_multiply} does.
+     */
+    public PublicKey scalarMultiply(byte[] bigEndianInteger) {
+        Objects.requireNonNull(bigEndianInteger, "bigEndianInteger");
+        MemorySegment product = newPoint();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment scalar = arena.allocate(Blst.SCALAR_SIZE, Blst.ALIGNMENT);
+            MemorySegment in = arena.allocate(Math.max(bigEndianInteger.length, 1));
+            MemorySegment.copy(bigEndianInteger, 0, in, JAVA_BYTE, 0, bigEndianInteger.length);
+            Blst.scalarFromBeBytes(scalar, in, bigEndianInteger.length);
+            Blst.p1Mult(product, point, scalar, 256);
         }
-
-        return point.in_group();
+        return new PublicKey(product);
     }
 
-
-    /**
-     * Returns a hexadecimal string representation of this PublicKey instance.
-     *
-     * @return A string containing the hexadecimal representation of the serialized PublicKey.
-     */
-    @Override
-    public String toString() {
-        return serialize().toHexString();
+    /** First four bytes of SHA-256 of the serialized key, as an unsigned 32-bit value. */
+    public long getFingerprint() {
+        byte[] hash = Bytes.sha256(bytes);
+        return ((hash[0] & 0xffL) << 24) | ((hash[1] & 0xffL) << 16) | ((hash[2] & 0xffL) << 8) | (hash[3] & 0xffL);
     }
 
-
     /**
-     * Determines whether the given object is a PublicKey and has the same point value as this PublicKey.
+     * Unhardened (BIP32-style) child derivation, matching chia-bls
+     * {@code PublicKey::derive_unhardened}: {@code child = parent + G1 * int(SHA256(parent || index))}.
      *
-     * @param obj The object to be compared with this PublicKey.
-     * @return True if the object is a PublicKey and has the same point value, otherwise false.
+     * @param index child index, interpreted as an unsigned 32-bit integer
      */
+    public PublicKey deriveUnhardened(int index) {
+        byte[] digest = Bytes.sha256(bytes, Bytes.uint32(index));
+        MemorySegment child = newPoint();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment scalar = arena.allocate(Blst.SCALAR_SIZE, Blst.ALIGNMENT);
+            Blst.scalarFromBeBytes(scalar, arena.allocateFrom(JAVA_BYTE, digest), digest.length);
+            Blst.p1Mult(child, Blst.p1Generator(), scalar, 256);
+            Blst.p1AddOrDouble(child, child, point);
+        }
+        return new PublicKey(child);
+    }
+
+    MemorySegment point() {
+        return point;
+    }
+
+    MemorySegment toAffine(Arena arena) {
+        MemorySegment affine = arena.allocate(Blst.P1_AFFINE_SIZE, Blst.ALIGNMENT);
+        Blst.p1ToAffine(affine, point);
+        return affine;
+    }
+
+    byte[] bytesUnsafe() {
+        return bytes;
+    }
+
     @Override
     public boolean equals(Object obj) {
-        if (Objects.isNull(obj)) {
-            throw new IllegalArgumentException("The provided object cannot be null.");
+        if (this == obj) {
+            return true;
         }
-
-        if (!(obj instanceof PublicKey otherPublicKey)) {
-            return false;
-        }
-
-        return point.is_equal(otherPublicKey.point);
+        return obj instanceof PublicKey other && Blst.p1IsEqual(point, other.point);
     }
 
     @Override
     public int hashCode() {
-        int result = 17;
-        result = 31 * result + (point != null ? Arrays.hashCode(point.serialize()) : 0);
-        return result;
+        return Arrays.hashCode(bytes);
     }
 
-
+    /** Hex of the compressed encoding. */
+    @Override
+    public String toString() {
+        return HexFormat.of().formatHex(bytes);
+    }
 }

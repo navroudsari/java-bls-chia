@@ -1,40 +1,28 @@
 package surf.superhighway.bls;
 
-import org.apache.tuweni.bytes.Bytes;
-import org.apache.tuweni.bytes.Bytes32;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-import java.security.NoSuchAlgorithmException;
-import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
 
-import static org.junit.Assert.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static surf.superhighway.bls.TestBytes.of;
+import static surf.superhighway.bls.TestBytes.random;
+import static surf.superhighway.bls.TestBytes.repeat;
 
-public class AggregateSignaturesTest {
-
-    SecureRandom secureRandom;
-
-    public AggregateSignaturesTest() {
-        try {
-            secureRandom = SecureRandom.getInstance("NativePRNG");
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException(e);
-        }
-    }
+class AggregateSignaturesTest {
 
     @Test
-    public void shouldCreateAggregatesWithAggPrivateKeyUsingBasicScheme() {
-        final Bytes message = Bytes.of(100, 2, 254, 88, 90, 45, 23);
-        final Bytes seed1 = Bytes32.repeat((byte) 0x07);
-        final Bytes seed2 = Bytes32.repeat((byte) 0x08);
+    void aggregatesWithAggregatePrivateKeyUsingBasicScheme() {
+        byte[] message = of(100, 2, 254, 88, 90, 45, 23);
+        BasicSignatureScheme basic = BasicSignatureScheme.getInstance();
 
-        final BasicSignatureScheme basicSchemeMPL = BasicSignatureScheme.getInstance();
-
-        PrivateKey privateKey1 = BasicSignatureScheme.keygen(seed1);
+        PrivateKey privateKey1 = PrivateKey.fromSeed(repeat(0x07, 32));
         PublicKey publicKey1 = privateKey1.getPublicKey();
-
-        PrivateKey privateKey2 = BasicSignatureScheme.keygen(seed2);
+        PrivateKey privateKey2 = PrivateKey.fromSeed(repeat(0x08, 32));
         PublicKey publicKey2 = privateKey2.getPublicKey();
 
         PrivateKey aggregatedPrivateKey1 = PrivateKey.aggregate(List.of(privateKey1, privateKey2));
@@ -44,28 +32,26 @@ public class AggregateSignaturesTest {
         PublicKey aggregatedPublicKey = publicKey1.add(publicKey2);
         assertEquals(aggregatedPublicKey, aggregatedPrivateKey1.getPublicKey());
 
-        Signature signature1 = basicSchemeMPL.sign(privateKey1, message);
-        Signature signature2 = basicSchemeMPL.sign(privateKey2, message);
-
-        Signature aggregatedSignature2 = basicSchemeMPL.sign(aggregatedPrivateKey1, message);
-
-        Signature aggregatedSignature = basicSchemeMPL.aggregateSignatures(List.of(signature1, signature2));
+        Signature signature1 = basic.sign(privateKey1, message);
+        Signature signature2 = basic.sign(privateKey2, message);
+        Signature aggregatedSignature2 = basic.sign(aggregatedPrivateKey1, message);
+        Signature aggregatedSignature = basic.aggregateSignatures(List.of(signature1, signature2));
         assertEquals(aggregatedSignature, aggregatedSignature2);
 
-        // Verify as a single Signature
-        assertTrue(basicSchemeMPL.verify(aggregatedPublicKey, message, aggregatedSignature));
-        assertTrue(basicSchemeMPL.verify(aggregatedPublicKey, message, aggregatedSignature2));
+        // Verify as a single signature
+        assertTrue(basic.verify(aggregatedPublicKey, message, aggregatedSignature));
+        assertTrue(basic.verify(aggregatedPublicKey, message, aggregatedSignature2));
 
-        // Verify aggregate with both keys (Fails since not distinct)
-        assertFalse(basicSchemeMPL.aggregateVerify(List.of(publicKey1, publicKey2), List.of(message, message), aggregatedSignature));
-        assertFalse(basicSchemeMPL.aggregateVerify(List.of(publicKey1, publicKey2), List.of(message, message), aggregatedSignature2));
+        // Aggregate verification with both keys fails since the messages are not distinct
+        assertFalse(basic.aggregateVerify(List.of(publicKey1, publicKey2), List.of(message, message), aggregatedSignature));
+        assertFalse(basic.aggregateVerify(List.of(publicKey1, publicKey2), List.of(message, message), aggregatedSignature2));
 
-        // Try the same with distinct message, and same privateKey
-        Bytes message2 = Bytes.of(200, 29, 54, 8, 9, 29, 155, 55);
-        Signature signatures3 = basicSchemeMPL.sign(privateKey2, message2);
-        Signature aggregatedSignatureFinal = basicSchemeMPL.aggregateSignatures(List.of(aggregatedSignature, signatures3));
-        Signature aggregatedSignatureAlt = basicSchemeMPL.aggregateSignatures(List.of(signature1, signature2, signatures3));
-        Signature aggregatedSignatureAlt2 = basicSchemeMPL.aggregateSignatures(List.of(signature1, signatures3, signature2));
+        // Distinct message, same private key
+        byte[] message2 = of(200, 29, 54, 8, 9, 29, 155, 55);
+        Signature signature3 = basic.sign(privateKey2, message2);
+        Signature aggregatedSignatureFinal = basic.aggregateSignatures(List.of(aggregatedSignature, signature3));
+        Signature aggregatedSignatureAlt = basic.aggregateSignatures(List.of(signature1, signature2, signature3));
+        Signature aggregatedSignatureAlt2 = basic.aggregateSignatures(List.of(signature1, signature3, signature2));
         assertEquals(aggregatedSignatureFinal, aggregatedSignatureAlt);
         assertEquals(aggregatedSignatureFinal, aggregatedSignatureAlt2);
 
@@ -79,110 +65,143 @@ public class AggregateSignaturesTest {
         assertEquals(pkFinal, pkFinalAlt);
         assertNotEquals(pkFinal, aggregatedPublicKey);
 
-        // Cannot verify with aggregatedPublicKey (since we have multiple messages)
-        assertTrue(basicSchemeMPL.aggregateVerify(List.of(aggregatedPublicKey, publicKey2), List.of(message, message2), aggregatedSignatureFinal));
+        assertTrue(basic.aggregateVerify(List.of(aggregatedPublicKey, publicKey2), List.of(message, message2), aggregatedSignatureFinal));
     }
 
     @Test
-    public void shouldCreateAggregatesWithAggregatePrivateKeyUsingAugScheme() {
-        final Bytes message = Bytes.of(100, 2, 254, 88, 90, 45, 23);
-        final Bytes seed1 = Bytes32.repeat((byte) 0x07);
-        final Bytes seed2 = Bytes32.repeat((byte) 0x08);
+    void aggregatesWithAggregatePrivateKeyUsingAugScheme() {
+        byte[] message = of(100, 2, 254, 88, 90, 45, 23);
+        MessageAugmentationSignatureScheme aug = MessageAugmentationSignatureScheme.getInstance();
 
-        final MessageAugmentationSignatureScheme augSchemeMPL = MessageAugmentationSignatureScheme.getInstance();
-
-        PrivateKey privateKey1 = MessageAugmentationSignatureScheme.keygen(seed1);
-        PublicKey publicKey1 = privateKey1.getPublicKey();
-
-        PrivateKey privateKey2 = MessageAugmentationSignatureScheme.keygen(seed2);
-        PublicKey publicKey2 = privateKey2.getPublicKey();
+        PrivateKey privateKey1 = PrivateKey.fromSeed(repeat(0x07, 32));
+        PrivateKey privateKey2 = PrivateKey.fromSeed(repeat(0x08, 32));
 
         PrivateKey aggregatedPrivateKey1 = PrivateKey.aggregate(List.of(privateKey1, privateKey2));
         PrivateKey aggregatedPrivateKey2 = PrivateKey.aggregate(List.of(privateKey2, privateKey1));
         assertEquals(aggregatedPrivateKey1, aggregatedPrivateKey2);
 
-        PublicKey aggregatedPublicKey = publicKey1.add(publicKey2);
+        PublicKey aggregatedPublicKey = privateKey1.getPublicKey().add(privateKey2.getPublicKey());
         assertEquals(aggregatedPublicKey, aggregatedPrivateKey1.getPublicKey());
 
-        //
-        // Note, AugScheme will automatically prepend the public key of the
-        // provided private key to the message before signing. This creates
-        // problems in aggregation here as then the messages are all technically
-        // different so the aggregation doesn't work as expected. So you must
-        // specify directly the same public key (PublicKey) for all messages.
-        // Here we use the Aggregate Public Key, however, you can use any
-        // PublicKey as long as there are all the same.
-        //
-        Signature signature1 = augSchemeMPL.sign(privateKey1, message, aggregatedPublicKey);
-        Signature signature2 = augSchemeMPL.sign(privateKey2, message, aggregatedPublicKey);
+        // The aug scheme prepends the signer's key, so every signer must prepend the same
+        // (aggregate) key for the signatures to aggregate over one message.
+        Signature signature1 = aug.sign(privateKey1, message, aggregatedPublicKey);
+        Signature signature2 = aug.sign(privateKey2, message, aggregatedPublicKey);
+        Signature aggregatedSignature2 = aug.sign(aggregatedPrivateKey1, message, aggregatedPublicKey);
 
-        // Technically passing in aggregatedPublicKey is unneeded, but kept for clarity
-        Signature aggregatedSignature2 = augSchemeMPL.sign(aggregatedPrivateKey1, message, aggregatedPublicKey);
-
-        Signature aggregatedSignature = augSchemeMPL.aggregateSignatures(List.of(signature1, signature2));
+        Signature aggregatedSignature = aug.aggregateSignatures(List.of(signature1, signature2));
         assertEquals(aggregatedSignature, aggregatedSignature2);
 
-        // Verify as a single Signature
-        assertTrue(augSchemeMPL.verify(aggregatedPublicKey, message, aggregatedSignature));
-        assertTrue(augSchemeMPL.verify(aggregatedPublicKey, message, aggregatedSignature2));
+        assertTrue(aug.verify(aggregatedPublicKey, message, aggregatedSignature));
+        assertTrue(aug.verify(aggregatedPublicKey, message, aggregatedSignature2));
     }
 
     @Test
-    public void shouldAggregateWithMultipleLevelsAndDifferentMessages() {
-        final Bytes message1 = Bytes.of(100, 2, 254, 88, 90, 45, 23);
-        final Bytes message2 = Bytes.of(192, 29, 2, 0, 0, 45, 23);
-        final Bytes message3 = Bytes.of(52, 29, 2, 0, 0, 45, 102);
-        final Bytes message4 = Bytes.of(99, 29, 2, 0, 0, 45, 222);
+    void aggregatesWithMultipleLevelsAndDifferentMessages() {
+        byte[] message1 = of(100, 2, 254, 88, 90, 45, 23);
+        byte[] message2 = of(192, 29, 2, 0, 0, 45, 23);
+        byte[] message3 = of(52, 29, 2, 0, 0, 45, 102);
+        byte[] message4 = of(99, 29, 2, 0, 0, 45, 222);
+        MessageAugmentationSignatureScheme aug = MessageAugmentationSignatureScheme.getInstance();
 
-        final MessageAugmentationSignatureScheme augSchemeMPL = MessageAugmentationSignatureScheme.getInstance();
-
-        PrivateKey privateKey1 = MessageAugmentationSignatureScheme.keygen(Bytes.secure(secureRandom.generateSeed(32)));
-        PrivateKey privateKey2 = MessageAugmentationSignatureScheme.keygen(Bytes.secure(secureRandom.generateSeed(32)));
-
+        PrivateKey privateKey1 = PrivateKey.fromSeed(random(32));
+        PrivateKey privateKey2 = PrivateKey.fromSeed(random(32));
         PublicKey publicKey1 = privateKey1.getPublicKey();
         PublicKey publicKey2 = privateKey2.getPublicKey();
 
-        Signature signature1 = augSchemeMPL.sign(privateKey1, message1);
-        Signature signature2 = augSchemeMPL.sign(privateKey2, message2);
-        Signature signatures3 = augSchemeMPL.sign(privateKey2, message3);
-        Signature signatures4 = augSchemeMPL.sign(privateKey1, message4);
+        Signature aggregateL = aug.aggregateSignatures(List.of(aug.sign(privateKey1, message1), aug.sign(privateKey2, message2)));
+        Signature aggregateR = aug.aggregateSignatures(List.of(aug.sign(privateKey2, message3), aug.sign(privateKey1, message4)));
+        Signature aggregate = aug.aggregateSignatures(List.of(aggregateL, aggregateR));
 
-        List<Signature> signaturesL = List.of(signature1, signature2);
-        Signature aggregatedSignaturesL = augSchemeMPL.aggregateSignatures(signaturesL);
-
-        List<Signature> signaturesR = List.of(signatures3, signatures4);
-        Signature aggregatedSignaturesR = augSchemeMPL.aggregateSignatures(signaturesR);
-
-        List<Signature> signatures = List.of(aggregatedSignaturesL, aggregatedSignaturesR);
-        Signature aggregatedSignature = augSchemeMPL.aggregateSignatures(signatures);
-
-        List<PublicKey> allPublicKeys = List.of(publicKey1, publicKey2, publicKey2, publicKey1);
-        List<Bytes> allMessages = List.of(message1, message2, message3, message4);
-        assertTrue(augSchemeMPL.aggregateVerify(allPublicKeys, allMessages, aggregatedSignature));
+        assertTrue(aug.aggregateVerify(List.of(publicKey1, publicKey2, publicKey2, publicKey1),
+                List.of(message1, message2, message3, message4), aggregate));
     }
 
     @Test
-    public void shouldAggregateWithMultipleLevelsAndDegenerate() {
-        final Bytes message1 = Bytes.of(100, 2, 254, 88, 90, 45, 23);
+    void aggregatesWithMultipleLevelsAndDegenerateMessages() {
+        byte[] message = of(100, 2, 254, 88, 90, 45, 23);
+        MessageAugmentationSignatureScheme aug = MessageAugmentationSignatureScheme.getInstance();
 
-        final MessageAugmentationSignatureScheme augSchemeMPL = MessageAugmentationSignatureScheme.getInstance();
-
-        PrivateKey privateKey1 = MessageAugmentationSignatureScheme.keygen(Bytes.secure(secureRandom.generateSeed(32)));
-        PublicKey publicKey1 = privateKey1.getPublicKey();
-        Signature aggregatedSignature = augSchemeMPL.sign(privateKey1, message1);
-        List<PublicKey> publicKeys = new ArrayList<>();
-        publicKeys.add(publicKey1);
-        List<Bytes> messages = new ArrayList<>();
-        messages.add(message1);
+        PrivateKey privateKey1 = PrivateKey.fromSeed(random(32));
+        Signature aggregate = aug.sign(privateKey1, message);
+        List<PublicKey> publicKeys = new ArrayList<>(List.of(privateKey1.getPublicKey()));
+        List<byte[]> messages = new ArrayList<>(List.of(message));
 
         for (int i = 0; i < 10; i++) {
-            PrivateKey privateKey = MessageAugmentationSignatureScheme.keygen(Bytes.secure(secureRandom.generateSeed(32)));
-            PublicKey publicKey = privateKey.getPublicKey();
-            publicKeys.add(publicKey);
-            messages.add(message1);
-            Signature signature = augSchemeMPL.sign(privateKey, message1);
-            aggregatedSignature = augSchemeMPL.aggregateSignatures(List.of(aggregatedSignature, signature));
+            PrivateKey privateKey = PrivateKey.fromSeed(random(32));
+            publicKeys.add(privateKey.getPublicKey());
+            messages.add(message);
+            aggregate = aug.aggregateSignatures(List.of(aggregate, aug.sign(privateKey, message)));
         }
-        assertTrue(augSchemeMPL.aggregateVerify(publicKeys, messages, aggregatedSignature));
+        assertTrue(aug.aggregateVerify(publicKeys, messages, aggregate));
+    }
+
+    @Test
+    void augAggregatesManySignaturesWithDifferentMessages() {
+        MessageAugmentationSignatureScheme aug = MessageAugmentationSignatureScheme.getInstance();
+        List<PublicKey> publicKeys = new ArrayList<>();
+        List<Signature> signatures = new ArrayList<>();
+        List<byte[]> messages = new ArrayList<>();
+
+        for (int i = 0; i < 80; i++) {
+            byte[] message = of(0, 100, 2, 45, 64, 12, 12, 63, i);
+            PrivateKey privateKey = PrivateKey.fromSeed(random(32));
+            publicKeys.add(privateKey.getPublicKey());
+            signatures.add(aug.sign(privateKey, message));
+            messages.add(message);
+        }
+
+        assertTrue(aug.aggregateVerify(publicKeys, messages, aug.aggregateSignatures(signatures)));
+    }
+
+    @Test
+    void basicSchemeRejectsSameMessageButAugAndPopAccept() {
+        byte[] message = of(100, 2, 254, 88, 90, 45, 23);
+        PrivateKey privateKey1 = PrivateKey.fromSeed(repeat(0x50, 32));
+        PrivateKey privateKey2 = PrivateKey.fromSeed(repeat(0x70, 32));
+        PublicKey publicKey1 = privateKey1.getPublicKey();
+        PublicKey publicKey2 = privateKey2.getPublicKey();
+
+        BasicSignatureScheme basic = BasicSignatureScheme.getInstance();
+        Signature basicAggregate = basic.aggregateSignatures(List.of(basic.sign(privateKey1, message), basic.sign(privateKey1, message)));
+        assertFalse(basic.aggregateVerify(List.of(publicKey1, publicKey2), List.of(message, message), basicAggregate));
+
+        MessageAugmentationSignatureScheme aug = MessageAugmentationSignatureScheme.getInstance();
+        Signature augAggregate = aug.aggregateSignatures(List.of(aug.sign(privateKey1, message), aug.sign(privateKey2, message)));
+        assertTrue(aug.aggregateVerify(List.of(publicKey1, publicKey2), List.of(message, message), augAggregate));
+
+        ProofOfPossessionSignatureScheme pop = ProofOfPossessionSignatureScheme.getInstance();
+        Signature popAggregate = pop.aggregateSignatures(List.of(pop.sign(privateKey1, message), pop.sign(privateKey2, message)));
+        assertTrue(pop.aggregateVerify(List.of(publicKey1, publicKey2), List.of(message, message), popAggregate));
+    }
+
+    @Test
+    void aggregateOfSameSignatureVerifies() {
+        byte[] message = of(100, 2, 254, 88, 90, 45, 23);
+        PrivateKey privateKey = PrivateKey.fromSeed(repeat(0x50, 32));
+        PublicKey publicKey = privateKey.getPublicKey();
+
+        MessageAugmentationSignatureScheme aug = MessageAugmentationSignatureScheme.getInstance();
+        Signature signature = aug.sign(privateKey, message);
+        Signature aggregate = aug.aggregateSignatures(List.of(signature, signature));
+        assertTrue(aug.aggregateVerify(List.of(publicKey, publicKey), List.of(message, message), aggregate));
+    }
+
+    @Test
+    void emptyAggregateVerifiesOnlyWithInfinity() {
+        MessageAugmentationSignatureScheme aug = MessageAugmentationSignatureScheme.getInstance();
+        BasicSignatureScheme basic = BasicSignatureScheme.getInstance();
+        ProofOfPossessionSignatureScheme pop = ProofOfPossessionSignatureScheme.getInstance();
+
+        Signature aggregate = aug.aggregateSignatures(List.of(Signature.infinity()));
+        assertEquals(Signature.infinity(), aggregate);
+        assertEquals(Signature.infinity(), aug.aggregateSignatures(List.of()));
+
+        assertTrue(aug.aggregateVerify(List.of(), List.of(), aggregate));
+        assertTrue(basic.aggregateVerify(List.of(), List.of(), aggregate));
+        assertFalse(pop.fastAggregateVerify(List.of(), new byte[0], aggregate));
+
+        Signature notInfinity = basic.sign(PrivateKey.fromSeed(repeat(1, 32)), of(1));
+        assertFalse(basic.aggregateVerify(List.of(), List.of(), notInfinity));
     }
 }
