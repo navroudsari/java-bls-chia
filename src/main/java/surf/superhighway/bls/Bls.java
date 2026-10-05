@@ -2,6 +2,7 @@ package surf.superhighway.bls;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Objects;
@@ -18,7 +19,27 @@ public final class Bls {
     private static final MessageAugmentationSignatureScheme AUG = MessageAugmentationSignatureScheme.getInstance();
     private static final byte[] G1_DST = "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_AUG_".getBytes(StandardCharsets.US_ASCII);
 
+    /** The order r of G1, G2 and GT: scalars and private keys are integers modulo r. */
+    public static final BigInteger GROUP_ORDER =
+            new BigInteger("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001", 16);
+
     private Bls() {
+    }
+
+    /**
+     * {@code value mod r} as 32 big-endian bytes, for a value of any sign: negative values wrap
+     * to {@code r - |value| mod r}. This is clvm's {@code mod_group_order} and chia-puzzle-types'
+     * {@code mod_by_group_order}. Pass a {@code BigInteger} built with the signedness you mean:
+     * {@code new BigInteger(bytes)} for two's-complement (CLVM atoms, Chia's synthetic-key
+     * offset), {@code new BigInteger(1, bytes)} for unsigned.
+     */
+    public static byte[] modGroupOrder(BigInteger value) {
+        Objects.requireNonNull(value, "value");
+        byte[] magnitude = value.mod(GROUP_ORDER).toByteArray();   // non-negative, at most 33 bytes
+        byte[] out = new byte[32];
+        int length = Math.min(magnitude.length, 32);
+        System.arraycopy(magnitude, magnitude.length - length, out, 32 - length, length);
+        return out;
     }
 
     /** Signs {@code message} prefixed with the signer's public key. chia-bls {@code sign}. */

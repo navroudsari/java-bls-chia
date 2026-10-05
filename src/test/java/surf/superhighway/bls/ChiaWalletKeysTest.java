@@ -18,7 +18,6 @@ import static surf.superhighway.bls.TestBytes.hex;
  */
 class ChiaWalletKeysTest {
 
-    private static final BigInteger GROUP_ORDER = new BigInteger("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001", 16);
     private static final byte[] DEFAULT_HIDDEN_PUZZLE_HASH = hex("711d6c4e32c92e53179b199484cf8c897542bc57f2b22582799f9d657eec4699");
     private static final byte[] MASTER = hex("6bb19282e27bc6e7e397fb19efc2627a412410fdfd13bf14f4ce5bfdce084c71");
 
@@ -66,12 +65,7 @@ class ChiaWalletKeysTest {
      */
     private static PrivateKey syntheticOffset(PublicKey publicKey) {
         byte[] digest = Bytes.sha256(publicKey.toBytes(), DEFAULT_HIDDEN_PUZZLE_HASH);
-        BigInteger offset = new BigInteger(digest).mod(GROUP_ORDER);   // signed, then mod
-        byte[] magnitude = offset.toByteArray();
-        byte[] out = new byte[32];
-        int length = Math.min(magnitude.length, 32);
-        System.arraycopy(magnitude, magnitude.length - length, out, 32 - length, length);
-        return PrivateKey.fromBytes(out);
+        return PrivateKey.fromBytes(Bls.modGroupOrder(new BigInteger(digest)));   // signed, then mod r
     }
 
     @Test

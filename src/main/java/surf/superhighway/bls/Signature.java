@@ -2,6 +2,7 @@ package surf.superhighway.bls;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
@@ -163,7 +164,7 @@ public final class Signature {
     }
 
     /**
-     * Multiplies this point by an integer given as big-endian bytes of any length (reduced
+     * Multiplies this point by an integer given as unsigned big-endian bytes of any length (reduced
      * modulo the group order), as chia-bls {@code Signature::scalar_multiply} does.
      */
     public Signature scalarMultiply(byte[] bigEndianInteger) {
@@ -180,14 +181,23 @@ public final class Signature {
     }
 
     /**
+     * Multiplies this point by an integer of any sign, reduced modulo the group order, as clvm's
+     * {@code g2_multiply} does.
+     */
+    public Signature scalarMultiply(BigInteger n) {
+        return scalarMultiply(Bls.modGroupOrder(n));
+    }
+
+    /**
      * Unhardened child derivation of a G2 element, matching Chia's C++
      * {@code HDKeys::DeriveChildG2Unhardened} and Python {@code derive_child_g2_unhardened}:
      * {@code child = parent + G2 * int(SHA256(parent || index))} with the digest read big-endian.
      * (chia-bls in Rust has no G2 derivation.)
      *
-     * @param index child index, interpreted as an unsigned 32-bit integer
+     * @param index child index, 0 to 4294967295 (a Rust {@code u32})
+     * @throws IllegalArgumentException if {@code index} is outside that range
      */
-    public Signature deriveUnhardened(int index) {
+    public Signature deriveUnhardened(long index) {
         byte[] digest = Bytes.sha256(bytes, Bytes.uint32(index));
         MemorySegment child = newPoint();
         try (Arena arena = Arena.ofConfined()) {

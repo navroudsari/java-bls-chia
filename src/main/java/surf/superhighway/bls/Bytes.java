@@ -23,8 +23,23 @@ final class Bytes {
         return digest.digest();
     }
 
-    /** I2OSP(value, 4): the index as 4 big-endian bytes, treating {@code value} as unsigned. */
-    static byte[] uint32(int value) {
+    static final long MAX_INDEX = 0xFFFF_FFFFL;
+
+    /**
+     * Validates a child index (a Rust {@code u32}) and returns its 32 bits as an int.
+     *
+     * @throws IllegalArgumentException if {@code index} is outside [0, 4294967295]
+     */
+    static int childIndex(long index) {
+        if (index < 0 || index > MAX_INDEX) {
+            throw new IllegalArgumentException("Child index must be in [0, 4294967295] (u32), got " + index);
+        }
+        return (int) index;
+    }
+
+    /** I2OSP(index, 4): a validated child index as 4 big-endian bytes, as Rust's {@code u32::to_be_bytes}. */
+    static byte[] uint32(long index) {
+        int value = childIndex(index);
         return new byte[]{(byte) (value >>> 24), (byte) (value >>> 16), (byte) (value >>> 8), (byte) value};
     }
 

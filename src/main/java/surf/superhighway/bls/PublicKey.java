@@ -2,6 +2,7 @@ package surf.superhighway.bls;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
@@ -142,11 +143,20 @@ public final class PublicKey {
     }
 
     /**
-     * {@code G1 * n} for an integer given as big-endian bytes (reduced modulo the group order):
+     * {@code G1 * n} for an integer given as unsigned big-endian bytes (reduced modulo the group order):
      * the public key of the private key {@code n}. chia-bls {@code PublicKey::from_integer}.
      */
     public static PublicKey fromInteger(byte[] bigEndianInteger) {
         return GENERATOR.scalarMultiply(bigEndianInteger);
+    }
+
+    /**
+     * {@code G1 * n} for an integer of any sign, reduced modulo the group order (so
+     * {@code fromInteger(-1)} is {@code generator().negate()}). This is clvm's
+     * {@code pubkey_for_exp}.
+     */
+    public static PublicKey fromInteger(BigInteger n) {
+        return GENERATOR.scalarMultiply(n);
     }
 
     /** Sums public keys. An empty list yields {@link #infinity()}. */
@@ -188,7 +198,7 @@ public final class PublicKey {
     }
 
     /**
-     * Multiplies this point by an integer given as big-endian bytes of any length (reduced
+     * Multiplies this point by an integer given as unsigned big-endian bytes of any length (reduced
      * modulo the group order), as chia-bls {@code PublicKey::scalar_multiply} does.
      */
     public PublicKey scalarMultiply(byte[] bigEndianInteger) {
@@ -204,6 +214,14 @@ public final class PublicKey {
         return new PublicKey(product);
     }
 
+    /**
+     * Multiplies this point by an integer of any sign, reduced modulo the group order, as clvm's
+     * {@code g1_multiply} does.
+     */
+    public PublicKey scalarMultiply(BigInteger n) {
+        return scalarMultiply(Bls.modGroupOrder(n));
+    }
+
     /** First four bytes of SHA-256 of the serialized key, as an unsigned 32-bit value. */
     public long getFingerprint() {
         byte[] hash = Bytes.sha256(bytes);
@@ -214,9 +232,10 @@ public final class PublicKey {
      * Unhardened (BIP32-style) child derivation, matching chia-bls
      * {@code PublicKey::derive_unhardened}: {@code child = parent + G1 * int(SHA256(parent || index))}.
      *
-     * @param index child index, interpreted as an unsigned 32-bit integer
+     * @param index child index, 0 to 4294967295 (a Rust {@code u32})
+     * @throws IllegalArgumentException if {@code index} is outside that range
      */
-    public PublicKey deriveUnhardened(int index) {
+    public PublicKey deriveUnhardened(long index) {
         byte[] digest = Bytes.sha256(bytes, Bytes.uint32(index));
         MemorySegment child = newPoint();
         try (Arena arena = Arena.ofConfined()) {

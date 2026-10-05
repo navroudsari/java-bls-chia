@@ -120,7 +120,7 @@ public final class PrivateKey implements Destroyable, AutoCloseable {
         });
     }
 
-    /** Parses 32 big-endian bytes as an integer and reduces it modulo the group order. */
+    /** Parses 32 bytes as an unsigned big-endian integer and reduces it modulo the group order. */
     public static PrivateKey fromBytesModOrder(byte[] bytes) {
         Bytes.requireLength(bytes, SIZE, "private key");
         return create(sk -> SecureMemory.withWipedBuffer(SIZE, buffer -> {
@@ -188,11 +188,13 @@ public final class PrivateKey implements Destroyable, AutoCloseable {
      * {@code SecretKey::derive_hardened}): EIP-2333's Lamport construction followed by KeyGen v3.
      * Runs entirely in native code; intermediate secrets are scrubbed before returning.
      *
-     * @param index child index, interpreted as an unsigned 32-bit integer
+     * @param index child index, 0 to 4294967295 (a Rust {@code u32})
+     * @throws IllegalArgumentException if {@code index} is outside that range
      */
-    public PrivateKey deriveHardened(int index) {
+    public PrivateKey deriveHardened(long index) {
+        int childIndex = Bytes.childIndex(index);
         return create(child -> withScalar(parent -> {
-            Blst.chiaDeriveChildSk(child, parent, index);
+            Blst.chiaDeriveChildSk(child, parent, childIndex);
             return null;
         }));
     }
@@ -202,9 +204,10 @@ public final class PrivateKey implements Destroyable, AutoCloseable {
      * {@code SecretKey::derive_unhardened}. The child's public key equals
      * {@code getPublicKey().deriveUnhardened(index)}.
      *
-     * @param index child index, interpreted as an unsigned 32-bit integer
+     * @param index child index, 0 to 4294967295 (a Rust {@code u32})
+     * @throws IllegalArgumentException if {@code index} is outside that range
      */
-    public PrivateKey deriveUnhardened(int index) {
+    public PrivateKey deriveUnhardened(long index) {
         byte[] digest = Bytes.sha256(publicKey.bytesUnsafe(), Bytes.uint32(index));
         return create(child -> {
             try (Arena arena = Arena.ofConfined()) {

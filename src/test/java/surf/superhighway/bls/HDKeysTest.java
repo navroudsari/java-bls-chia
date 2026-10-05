@@ -19,13 +19,27 @@ class HDKeysTest {
 
     private static final String RUST_TEST_SK = "52d75c4707e39595b27314547f9723e5530c01198af3fc5849d9a7af65631efb";
 
+    @ParameterizedTest
+    @CsvSource({
+            "3141592653589793238462643383279502884197169399375105820974944592, 4ff5e145590ed7b71e577bb04032396d1619ff41cb4e350053ed2dce8d1efd1c, 5c62dcf9654481292aafa3348f1d1b0017bbfb44d6881d26d2b17836b38f204d, 3141592653",
+            "0099FF991111002299DD7744EE3355BBDD8844115566CC55663355668888CC00, 1ebd704b86732c3f05f30563dee6189838e73998ebc9c209ccff422adee10c4b, 1b98db8b24296038eae3f64c25d693a269ef1e4d7ae0f691c572a46cf3c0913c, 4294967295",
+            "d4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3, 614d21b10c0e4996ac0608e0e7452d5720d95d20fe03c59a3321000a42432e1a, 08de7136e4afc56ae3ec03b20517d9c1232705a747f588fd17832f36ae337526, 42",
+            "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04, 0befcabff4a664461cc8f190cdd51c05621eb2837c71a1362df5b465a674ecfb, 1a1de3346883401f1e3b2281be5774080edb8e5ebe6f776b0f7af9fea942553a, 0",
+    })
+    void eip2333HardenedVectors(String seed, String master, String child, long index) {
+        PrivateKey masterKey = PrivateKey.fromSeed(hex(seed));
+        assertEquals(master, hex(masterKey.toBytes()));
+        assertEquals(child, hex(masterKey.deriveHardened(index).toBytes()));
+        assertEquals(master, hex(masterKey.toBytes()), "parent must not change");
+    }
+
     @Test
-    void publicDerivationTreatsIndexAsUnsigned() {
+    void maximumIndexIsSupported() {
         // Generated with python-impl: derive_child_g1_unhardened(pk, 0xFFFFFFFF)
         PrivateKey sk = PrivateKey.fromBytes(hex(RUST_TEST_SK));
-        PublicKey child = sk.getPublicKey().deriveUnhardened(0xFFFFFFFF);
+        PublicKey child = sk.getPublicKey().deriveUnhardened(0xFFFFFFFFL);
         assertEquals("b8b397a9bf38bcf6106f1c555aba0f799d1a37549e8893b8416c5315c561688d3c8a3a8a4aa3287af9b40b3b01187de2", hex(child.toBytes()));
-        assertEquals(child, sk.deriveUnhardened(-1).getPublicKey());
+        assertEquals(child, sk.deriveUnhardened(4294967295L).getPublicKey());
     }
 
     @ParameterizedTest
@@ -39,7 +53,7 @@ class HDKeysTest {
         PrivateKey sk = PrivateKey.fromBytes(hex(RUST_TEST_SK));
         Signature signature = MessageAugmentationSignatureScheme.getInstance().sign(sk, of(1, 2, 3));
         assertEquals("924c956ff652c5471e1a45d1639459c9efac8369809f5cf2f098f253d672b4733ac1f7b82fa5a59c386c49fd2336280b0ecbcc4b04c4f67d53cc77f8bc0f18efdf9e1300213d950ac0dddd08828636b96f8162e2ec847540c2e88e0060ddfd45", hex(signature.toBytes()));
-        assertEquals(child, hex(signature.deriveUnhardened((int) index).toBytes()));
+        assertEquals(child, hex(signature.deriveUnhardened(index).toBytes()));
     }
 
     @Test
