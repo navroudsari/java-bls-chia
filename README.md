@@ -22,7 +22,11 @@ cd java-bls-chia
 mvn verify
 ```
 
+In an existing clone, fetch blst first with `git submodule update --init`. Building needs JDK 22+.
+
 `mvn` compiles blst plus [`native/chia_bls.c`](native/chia_bls.c) for the host with [`native/build.sh`](native/build.sh) (needs a C compiler; on Windows, MSYS2 MinGW). blst is built in portable mode, selecting CPU features at runtime, as chia-bls does. CI ([`.github/workflows/build.yml`](.github/workflows/build.yml)) builds and tests every platform and packages one jar containing all native libraries.
+
+The library isn't published to Maven Central. To use it, either download the `java-bls-chia` artifact from a successful run of the build workflow (the jar for all platforms), or run `mvn install` to put a jar for your own platform in your local Maven repository.
 
 ## Usage
 
@@ -123,11 +127,11 @@ Java cannot guarantee that secrets are erased, because the garbage collector cop
 - `destroy()` / `close()` zeroizes the key immediately, and any later use throws `IllegalStateException`. Keys that are never destroyed are zeroized by a `Cleaner` once unreachable, at a time of the GC's choosing.
 - `toString()` never shows key material, and `equals` compares in constant time.
 
-Remaining exposure you control: the `byte[]` arguments and results of `fromSeed`, `fromBytes` and `toBytes` are ordinary heap arrays, so wipe them after use. Heap dumps, debuggers and anything else with access to process memory can still read live keys.
+Remaining exposure you control: the `byte[]` arguments and results of `fromSeed`, `fromBytes`, `fromBytesModOrder` and `toBytes` are ordinary heap arrays, so wipe them after use. `asHexString()` returns a `String`, which can't be wiped at all; avoid it for real keys. Heap dumps, debuggers and anything else with access to process memory can still read live keys.
 
 ## Compatibility with chia-bls (Rust)
 
-The API mirrors Chia's Rust crate [chia-bls](https://github.com/Chia-Network/chia_rs/tree/main/crates/chia-bls), the implementation the Chia node uses. Every chia-bls unit test is ported to Java and passes: [`RustPublicKeyTest`](src/test/java/surf/superhighway/bls/RustPublicKeyTest.java), [`RustSecretKeyTest`](src/test/java/surf/superhighway/bls/RustSecretKeyTest.java), [`RustSignatureTest`](src/test/java/surf/superhighway/bls/RustSignatureTest.java) and [`RustBlsCacheTest`](src/test/java/surf/superhighway/bls/RustBlsCacheTest.java). The only exceptions are its JSON tests, which exercise Python bindings. [`ChiaWalletKeysTest`](src/test/java/surf/superhighway/bls/ChiaWalletKeysTest.java) also reproduces real Chia wallet keys, from the master key down to the synthetic keys that sign spends.
+The API mirrors Chia's Rust crate [chia-bls](https://github.com/Chia-Network/chia_rs/tree/main/crates/chia-bls), the implementation the Chia node uses. Every chia-bls unit test (as of chia_rs commit [`6485640`](https://github.com/Chia-Network/chia_rs/commit/6485640), September 2026) is ported to Java and passes: [`RustPublicKeyTest`](src/test/java/surf/superhighway/bls/RustPublicKeyTest.java), [`RustSecretKeyTest`](src/test/java/surf/superhighway/bls/RustSecretKeyTest.java), [`RustSignatureTest`](src/test/java/surf/superhighway/bls/RustSignatureTest.java) and [`RustBlsCacheTest`](src/test/java/surf/superhighway/bls/RustBlsCacheTest.java). The only exceptions are its JSON tests, which exercise Python bindings. [`ChiaWalletKeysTest`](src/test/java/surf/superhighway/bls/ChiaWalletKeysTest.java) also reproduces real Chia wallet keys, from the master key down to the synthetic keys that sign spends.
 
 | chia-bls | Java |
 |---|---|
@@ -167,7 +171,10 @@ Java has no unsigned primitives, so the API makes signedness explicit through ty
 To choose the signedness of raw bytes, pick the `BigInteger` constructor: `new BigInteger(bytes)` reads two's complement (CLVM atoms, Chia's synthetic-key offset), `new BigInteger(1, bytes)` reads unsigned. For example, Chia's synthetic key offset is:
 
 ```java
-byte[] digest = sha256(publicKey.toBytes(), hiddenPuzzleHash);
+MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+sha256.update(publicKey.toBytes());
+sha256.update(hiddenPuzzleHash);
+byte[] digest = sha256.digest();
 PrivateKey offset = PrivateKey.fromBytes(Bls.modGroupOrder(new BigInteger(digest)));   // signed!
 ```
 
@@ -189,10 +196,18 @@ PrivateKey offset = PrivateKey.fromBytes(Bls.modGroupOrder(new BigInteger(digest
 | `PublicKey.ZERO`, `Signature.ZERO` | `PublicKey.infinity()`, `Signature.infinity()` |
 | `PrivateKey.ZERO` | `PrivateKey.fromBytes(new byte[32])` |
 | `generate()` | `generator()` |
-| `multiply(PublicKey)` | `scalarMultiply(byte[] bigEndianInteger)` |
+| `PublicKey.multiply(PublicKey)`, `Signature.multiply(Signature)` | `scalarMultiply(byte[])` (unsigned big-endian) or `scalarMultiply(BigInteger)` (any sign) |
+| `PublicKey.copy()`, `Signature.copy()` | Not needed: both are immutable, so share the instance (`PrivateKey.copy()` remains) |
+| `PrivateKey.getSignature()` (sk × G2 generator) | `Signature.generator().scalarMultiply(sk.toBytes())`, wiping the array afterwards |
+| `PrivateKey.signG2(msg, dst)` | `scheme.sign(sk, msg)` or `Bls.signRaw(sk, msg)`; signing under an arbitrary DST is no longer public, as in chia-bls |
+| `HDKeys.keygen`, `HDKeys.deriveChildSk`, `HDKeys.parentSKToLamportPK` | `PrivateKey.fromSeed`, `sk.deriveHardened(i)`; the Lamport step is internal (native) |
+| `HKDF`, `Util` | Removed (internal helpers) |
 | `getFingerprintAsHexString()` etc. | `getFingerprint()` (unsigned, as `long`) |
 | `toString()` gave hex | `toString()` gives chia-bls's debug form, e.g. `<G1Element 97f1…>`; use `toBytes()` for the encoding |
 | `IllegalStateException` / `IllegalArgumentException` for bad bytes | `BlsException` (an `IllegalArgumentException`) with chia-bls's error kinds |
+| `IllegalArgumentException` / `IllegalStateException` for null arguments | `NullPointerException` |
+| `aggregateSignatures` / `aggregatePublicKeys` threw on an empty list | Return the identity (`infinity()`), as Chia does |
+| Java 17 | Java 22+, with native access enabled (see Requirements) |
 
 Fixed in 0.2:
 - `deriveChildPrivateKey` returned the parent key and overwrote the caller's parent with a child computed using the wrong KeyGen version.
