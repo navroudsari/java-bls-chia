@@ -81,6 +81,15 @@ final class Blst {
     private static final MethodHandle PAIRING_FINALVERIFY = bind("blst_pairing_finalverify", JAVA_BOOLEAN, ADDRESS, ADDRESS);
     private static final MethodHandle AGGREGATED_IN_G2 = bind("blst_aggregated_in_g2", null, ADDRESS, ADDRESS);
 
+    private static final MethodHandle HASH_TO_G1 = bind("blst_hash_to_g1", null, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG);
+    private static final MethodHandle P1_DESERIALIZE = bind("blst_p1_deserialize", JAVA_INT, ADDRESS, ADDRESS);
+    private static final MethodHandle P2_DESERIALIZE = bind("blst_p2_deserialize", JAVA_INT, ADDRESS, ADDRESS);
+    private static final MethodHandle MILLER_LOOP = bind("blst_miller_loop", null, ADDRESS, ADDRESS, ADDRESS);
+    private static final MethodHandle FINAL_EXP = bind("blst_final_exp", null, ADDRESS, ADDRESS);
+    private static final MethodHandle FP12_MUL = bind("blst_fp12_mul", null, ADDRESS, ADDRESS, ADDRESS);
+    private static final MethodHandle FP12_IS_EQUAL = bind("blst_fp12_is_equal", JAVA_BOOLEAN, ADDRESS, ADDRESS);
+    private static final MethodHandle PAIRING_RAW_AGGREGATE = bind("blst_pairing_raw_aggregate", null, ADDRESS, ADDRESS, ADDRESS);
+
     private static final MethodHandle CHIA_DERIVE_CHILD_SK = bind("chia_bls_derive_child_sk", null, ADDRESS, ADDRESS, JAVA_INT);
     private static final MethodHandle CHIA_SCALAR_EQ = bind("chia_bls_scalar_eq", JAVA_INT, ADDRESS, ADDRESS);
     private static final MethodHandle CHIA_ZEROIZE = bind("chia_bls_zeroize", null, ADDRESS, JAVA_LONG);
@@ -397,6 +406,71 @@ final class Blst {
     static void aggregatedInG2(MemorySegment outFp12, MemorySegment sigAffine) {
         try {
             AGGREGATED_IN_G2.invokeExact(outFp12, sigAffine);
+        } catch (Throwable t) {
+            throw fail(t);
+        }
+    }
+
+    static void hashToG1(MemorySegment out, MemorySegment msg, long msgLen, MemorySegment dst, long dstLen) {
+        try {
+            HASH_TO_G1.invokeExact(out, msg, msgLen, dst, dstLen, MemorySegment.NULL, 0L);
+        } catch (Throwable t) {
+            throw fail(t);
+        }
+    }
+
+    static int p1Deserialize(MemorySegment outAffine, MemorySegment in) {
+        try {
+            return (int) P1_DESERIALIZE.invokeExact(outAffine, in);
+        } catch (Throwable t) {
+            throw fail(t);
+        }
+    }
+
+    static int p2Deserialize(MemorySegment outAffine, MemorySegment in) {
+        try {
+            return (int) P2_DESERIALIZE.invokeExact(outAffine, in);
+        } catch (Throwable t) {
+            throw fail(t);
+        }
+    }
+
+    /** {@code ret = MillerLoop(Q in G2, P in G1)}. */
+    static void millerLoop(MemorySegment outFp12, MemorySegment q2Affine, MemorySegment p1Affine) {
+        try {
+            MILLER_LOOP.invokeExact(outFp12, q2Affine, p1Affine);
+        } catch (Throwable t) {
+            throw fail(t);
+        }
+    }
+
+    static void finalExp(MemorySegment out, MemorySegment in) {
+        try {
+            FINAL_EXP.invokeExact(out, in);
+        } catch (Throwable t) {
+            throw fail(t);
+        }
+    }
+
+    static void fp12Mul(MemorySegment out, MemorySegment a, MemorySegment b) {
+        try {
+            FP12_MUL.invokeExact(out, a, b);
+        } catch (Throwable t) {
+            throw fail(t);
+        }
+    }
+
+    static boolean fp12IsEqual(MemorySegment a, MemorySegment b) {
+        try {
+            return (boolean) FP12_IS_EQUAL.invokeExact(a, b);
+        } catch (Throwable t) {
+            throw fail(t);
+        }
+    }
+
+    static void pairingRawAggregate(MemorySegment ctx, MemorySegment q2Affine, MemorySegment p1Affine) {
+        try {
+            PAIRING_RAW_AGGREGATE.invokeExact(ctx, q2Affine, p1Affine);
         } catch (Throwable t) {
             throw fail(t);
         }

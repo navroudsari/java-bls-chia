@@ -70,12 +70,13 @@ public final class Signature {
      * must be the identity or lie in the G2 subgroup, as Chia's {@code G2Element::FromBytes} and
      * chia-bls {@code Signature::from_bytes} require.
      *
-     * @throws IllegalArgumentException if the bytes are not a valid signature
+     * @throws BlsException if the bytes are not a valid signature
      */
     public static Signature fromBytes(byte[] bytes) {
         Signature signature = fromBytesUnchecked(bytes);
         if (!signature.isValid()) {
-            throw new IllegalArgumentException("Signature is not in the G2 subgroup");
+            // chia-bls reports a point outside G2 as BLST_POINT_NOT_ON_CURVE.
+            throw BlsException.invalidSignature(BlstError.BLST_POINT_NOT_ON_CURVE);
         }
         return signature;
     }
@@ -85,7 +86,7 @@ public final class Signature {
      * but <em>not</em> that it lies in the G2 subgroup. Verification methods in this library
      * reject signatures outside G2 regardless.
      *
-     * @throws IllegalArgumentException if the bytes are not a canonical encoding of a curve point
+     * @throws BlsException if the bytes are not a canonical encoding of a curve point
      */
     public static Signature fromBytesUnchecked(byte[] bytes) {
         Bytes.requireLength(bytes, SIZE, "signature");
@@ -94,11 +95,32 @@ public final class Signature {
             MemorySegment affine = arena.allocate(Blst.P2_AFFINE_SIZE, Blst.ALIGNMENT);
             int error = Blst.p2Uncompress(affine, in);
             if (error != Blst.BLST_SUCCESS) {
-                throw new IllegalArgumentException("Signature is invalid (blst error " + error + ")");
+                throw BlsException.invalidSignature(BlstError.fromCode(error));
             }
             MemorySegment point = newPoint();
             Blst.p2FromAffine(point, affine);
             return new Signature(point, bytes.clone());
+        }
+    }
+
+    /**
+     * Parses the 192-byte uncompressed encoding (x || y). Like chia-bls
+     * {@code Signature::from_uncompressed}, this checks the point is on the curve but not that it
+     * lies in G2.
+     *
+     * @throws BlsException if the bytes are not an uncompressed curve point
+     */
+    public static Signature fromUncompressed(byte[] bytes) {
+        Bytes.requireLength(bytes, 2 * SIZE, "uncompressed signature");
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment affine = arena.allocate(Blst.P2_AFFINE_SIZE, Blst.ALIGNMENT);
+            int error = Blst.p2Deserialize(affine, arena.allocateFrom(JAVA_BYTE, bytes));
+            if (error != Blst.BLST_SUCCESS) {
+                throw BlsException.invalidSignature(BlstError.fromCode(error));
+            }
+            MemorySegment point = newPoint();
+            Blst.p2FromAffine(point, affine);
+            return new Signature(point);
         }
     }
 
@@ -177,6 +199,20 @@ public final class Signature {
         return new Signature(child);
     }
 
+    /**
+     * The pairing {@code e(publicKey, this)}, with final exponentiation, as chia-bls
+     * {@code Signature::pair}. No subgroup checks are made.
+     */
+    public GTElement pair(PublicKey publicKey) {
+        Objects.requireNonNull(publicKey, "publicKey");
+        MemorySegment result = GTElement.newValue();
+        try (Arena arena = Arena.ofConfined()) {
+            Blst.millerLoop(result, toAffine(arena), publicKey.toAffine(arena));
+            Blst.finalExp(result, result);
+        }
+        return GTElement.fromValue(result);
+    }
+
     MemorySegment point() {
         return point;
     }
@@ -200,9 +236,9 @@ public final class Signature {
         return Arrays.hashCode(bytes);
     }
 
-    /** Hex of the compressed encoding. */
+    /** {@code <G2Element hex>}, as chia-bls's {@code Debug} output. */
     @Override
     public String toString() {
-        return HexFormat.of().formatHex(bytes);
+        return "<G2Element " + HexFormat.of().formatHex(bytes) + ">";
     }
 }

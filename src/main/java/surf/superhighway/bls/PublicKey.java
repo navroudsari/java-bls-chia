@@ -69,12 +69,13 @@ public final class PublicKey {
      * Parses and validates a compressed public key: the encoding must be canonical and the point
      * must be the identity or lie in the G1 subgroup.
      *
-     * @throws IllegalArgumentException if the bytes are not a valid public key
+     * @throws BlsException if the bytes are not a valid public key
      */
     public static PublicKey fromBytes(byte[] bytes) {
         PublicKey publicKey = fromBytesUnchecked(bytes);
         if (!publicKey.isValid()) {
-            throw new IllegalArgumentException("Public key is not in the G1 subgroup");
+            // chia-bls reports a point outside G1 as BLST_POINT_NOT_ON_CURVE.
+            throw BlsException.invalidPublicKey(BlstError.BLST_POINT_NOT_ON_CURVE);
         }
         return publicKey;
     }
@@ -85,7 +86,7 @@ public final class PublicKey {
      * trusted source; {@link #isValid()} performs the remaining check. Verification methods in
      * this library reject keys outside G1 regardless.
      *
-     * @throws IllegalArgumentException if the bytes are not a canonical encoding of a curve point
+     * @throws BlsException if the bytes are not a canonical encoding of a curve point
      */
     public static PublicKey fromBytesUnchecked(byte[] bytes) {
         Bytes.requireLength(bytes, SIZE, "public key");
@@ -95,15 +96,15 @@ public final class PublicKey {
         boolean zerosOnly = Bytes.allZero(bytes, 1);
         if ((first & 0xc0) == 0xc0) {
             if (first != 0xc0 || !zerosOnly) {
-                throw new IllegalArgumentException("Public key has a non-canonical infinity encoding");
+                throw BlsException.of(BlsException.Kind.G1_NOT_CANONICAL);
             }
             return INFINITY;
         }
         if ((first & 0xc0) != 0x80) {
-            throw new IllegalArgumentException("Public key has invalid flag bits");
+            throw BlsException.of(BlsException.Kind.G1_INFINITY_INVALID_BITS);
         }
         if (zerosOnly) {
-            throw new IllegalArgumentException("Public key has an invalid zero encoding");
+            throw BlsException.of(BlsException.Kind.G1_INFINITY_NOT_ZERO);
         }
 
         try (Arena arena = Arena.ofConfined()) {
@@ -111,12 +112,41 @@ public final class PublicKey {
             MemorySegment affine = arena.allocate(Blst.P1_AFFINE_SIZE, Blst.ALIGNMENT);
             int error = Blst.p1Uncompress(affine, in);
             if (error != Blst.BLST_SUCCESS) {
-                throw new IllegalArgumentException("Public key is invalid (blst error " + error + ")");
+                throw BlsException.invalidPublicKey(BlstError.fromCode(error));
             }
             MemorySegment point = newPoint();
             Blst.p1FromAffine(point, affine);
             return new PublicKey(point, bytes.clone());
         }
+    }
+
+    /**
+     * Parses the 96-byte uncompressed encoding (x || y). Like chia-bls
+     * {@code PublicKey::from_uncompressed}, this checks the point is on the curve but not that it
+     * lies in G1.
+     *
+     * @throws BlsException if the bytes are not an uncompressed curve point
+     */
+    public static PublicKey fromUncompressed(byte[] bytes) {
+        Bytes.requireLength(bytes, 2 * SIZE, "uncompressed public key");
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment affine = arena.allocate(Blst.P1_AFFINE_SIZE, Blst.ALIGNMENT);
+            int error = Blst.p1Deserialize(affine, arena.allocateFrom(JAVA_BYTE, bytes));
+            if (error != Blst.BLST_SUCCESS) {
+                throw BlsException.invalidPublicKey(BlstError.fromCode(error));
+            }
+            MemorySegment point = newPoint();
+            Blst.p1FromAffine(point, affine);
+            return new PublicKey(point);
+        }
+    }
+
+    /**
+     * {@code G1 * n} for an integer given as big-endian bytes (reduced modulo the group order):
+     * the public key of the private key {@code n}. chia-bls {@code PublicKey::from_integer}.
+     */
+    public static PublicKey fromInteger(byte[] bigEndianInteger) {
+        return GENERATOR.scalarMultiply(bigEndianInteger);
     }
 
     /** Sums public keys. An empty list yields {@link #infinity()}. */
@@ -225,9 +255,9 @@ public final class PublicKey {
         return Arrays.hashCode(bytes);
     }
 
-    /** Hex of the compressed encoding. */
+    /** {@code <G1Element hex>}, as chia-bls's {@code Debug} output. */
     @Override
     public String toString() {
-        return HexFormat.of().formatHex(bytes);
+        return "<G1Element " + HexFormat.of().formatHex(bytes) + ">";
     }
 }

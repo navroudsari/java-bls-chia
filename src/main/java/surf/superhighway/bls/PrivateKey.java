@@ -5,6 +5,8 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.ref.Cleaner;
 import java.lang.ref.Reference;
+import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
@@ -101,7 +103,8 @@ public final class PrivateKey implements Destroyable, AutoCloseable {
      * Parses a 32-byte big-endian key. The all-zero key is accepted (as Chia does); any other
      * value must be less than the group order.
      *
-     * @throws IllegalArgumentException if the value is not less than the group order
+     * @throws BlsException ({@link BlsException.Kind#SECRET_KEY_GROUP_ORDER}) if the value is
+     *                       not less than the group order
      */
     public static PrivateKey fromBytes(byte[] bytes) {
         Bytes.requireLength(bytes, SIZE, "private key");
@@ -112,7 +115,7 @@ public final class PrivateKey implements Destroyable, AutoCloseable {
                 sk.set(JAVA_BYTE, i, bytes[SIZE - 1 - i]);
             }
             if (!zero && !Blst.skCheck(sk)) {
-                throw new IllegalArgumentException("PrivateKey byte data must be less than the group order");
+                throw BlsException.of(BlsException.Kind.SECRET_KEY_GROUP_ORDER);
             }
         });
     }
@@ -143,6 +146,25 @@ public final class PrivateKey implements Destroyable, AutoCloseable {
                 key.withScalar(sk -> Blst.skAddNCheck(sum, sum, sk));
             }
         });
+    }
+
+    /** {@code this + other} modulo the group order, as chia-bls {@code SecretKey + SecretKey}. */
+    public PrivateKey add(PrivateKey other) {
+        Objects.requireNonNull(other, "other");
+        return aggregate(List.of(this, other));
+    }
+
+    /**
+     * The key as lowercase hex, as chia-bls {@code SecretKey::as_hex_string}. A Java
+     * {@code String} cannot be wiped, so prefer {@link #toBytes()} unless you need text.
+     */
+    public String asHexString() {
+        byte[] bytes = toBytes();
+        try {
+            return HexFormat.of().formatHex(bytes);
+        } finally {
+            Arrays.fill(bytes, (byte) 0);
+        }
     }
 
     /** The 32-byte big-endian encoding. The caller owns the returned array and should wipe it. */

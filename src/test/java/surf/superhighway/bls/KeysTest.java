@@ -67,8 +67,8 @@ class KeysTest {
     void fromBytesRejectsValuesAboveGroupOrder() {
         byte[] keyData = PrivateKey.fromSeed(repeat(0x10, 32)).toBytes();
         keyData[0] = (byte) 0xFF;
-        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () -> PrivateKey.fromBytes(keyData));
-        assertEquals("PrivateKey byte data must be less than the group order", exception.getMessage());
+        BlsException exception = assertThrows(BlsException.class, () -> PrivateKey.fromBytes(keyData));
+        assertEquals(BlsException.Kind.SECRET_KEY_GROUP_ORDER, exception.getKind());
     }
 
     @Test
@@ -179,8 +179,9 @@ class KeysTest {
     void publicKeyOutsideG1IsRejected() {
         byte[] notInG1 = hex("8d5d0fb73b9c92df4eab4216e48c3e358578b4cc30f82c268bd6fef3bd34b558628daf1afef798d4c3b0fcd8b28c8973");
 
-        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () -> PublicKey.fromBytes(notInG1));
-        assertEquals("Public key is not in the G1 subgroup", exception.getMessage());
+        BlsException exception = assertThrows(BlsException.class, () -> PublicKey.fromBytes(notInG1));
+        assertEquals(BlsException.Kind.INVALID_PUBLIC_KEY, exception.getKind());
+        assertEquals("PublicKey is invalid (BLST ERROR: BLST_POINT_NOT_ON_CURVE)", exception.getMessage());
 
         PublicKey badPublicKey = PublicKey.fromBytesUnchecked(notInG1);
         assertFalse(badPublicKey.isValid());

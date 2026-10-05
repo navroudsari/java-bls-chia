@@ -33,11 +33,11 @@ class ChiaVectorsTest {
         assertEquals(0xb40dd58aL, pk1.getFingerprint());
         assertEquals(0xb839add1L, pk2.getFingerprint());
 
-        assertEquals("b8faa6d6a3881c9fdbad803b170d70ca5cbf1e6ba5a586262df368c75acd1d1ffa3ab6ee21c71f844494659878f5eb230c958dd576b08b8564aad2ee0992e85a1e565f299cd53a285de729937f70dc176a1f01432129bb2b94d3d5031f8065a1", sig1.toString());
-        assertEquals("a9c4d3e689b82c7ec7e838dac2380cb014f9a08f6cd6ba044c263746e39a8f7a60ffee4afb78f146c2e421360784d58f0029491e3bd8ab84f0011d258471ba4e87059de295d9aba845c044ee83f6cf2411efd379ef38bf4cf41d5f3c0ae1205d", sig2.toString());
+        assertEquals("b8faa6d6a3881c9fdbad803b170d70ca5cbf1e6ba5a586262df368c75acd1d1ffa3ab6ee21c71f844494659878f5eb230c958dd576b08b8564aad2ee0992e85a1e565f299cd53a285de729937f70dc176a1f01432129bb2b94d3d5031f8065a1", hex(sig1.toBytes()));
+        assertEquals("a9c4d3e689b82c7ec7e838dac2380cb014f9a08f6cd6ba044c263746e39a8f7a60ffee4afb78f146c2e421360784d58f0029491e3bd8ab84f0011d258471ba4e87059de295d9aba845c044ee83f6cf2411efd379ef38bf4cf41d5f3c0ae1205d", hex(sig2.toBytes()));
 
         Signature aggSig1 = basic.aggregateSignatures(List.of(sig1, sig2));
-        assertEquals("aee003c8cdaf3531b6b0ca354031b0819f7586b5846796615aee8108fec75ef838d181f9d244a94d195d7b0231d4afcf06f27f0cc4d3c72162545c240de7d5034a7ef3a2a03c0159de982fbc2e7790aeb455e27beae91d64e077c70b5506dea3", aggSig1.toString());
+        assertEquals("aee003c8cdaf3531b6b0ca354031b0819f7586b5846796615aee8108fec75ef838d181f9d244a94d195d7b0231d4afcf06f27f0cc4d3c72162545c240de7d5034a7ef3a2a03c0159de982fbc2e7790aeb455e27beae91d64e077c70b5506dea3", hex(aggSig1.toBytes()));
 
         assertTrue(basic.aggregateVerify(List.of(pk1, pk2), List.of(msg1, msg2), aggSig1));
         assertFalse(basic.aggregateVerify(List.of(pk1, pk2), List.of(msg1, msg2), sig1));
@@ -55,7 +55,7 @@ class ChiaVectorsTest {
         Signature aggSig2 = basic.aggregateSignatures(List.of(sig3, sig4, sig5));
 
         assertTrue(basic.aggregateVerify(List.of(pk1, pk1, pk2), List.of(msg3, msg4, msg5), aggSig2));
-        assertEquals("a0b1378d518bea4d1100adbc7bdbc4ff64f2c219ed6395cd36fe5d2aa44a4b8e710b607afd965e505a5ac3283291b75413d09478ab4b5cfbafbeea366de2d0c0bcf61deddaa521f6020460fd547ab37659ae207968b545727beba0a3c5572b9c", aggSig2.toString());
+        assertEquals("a0b1378d518bea4d1100adbc7bdbc4ff64f2c219ed6395cd36fe5d2aa44a4b8e710b607afd965e505a5ac3283291b75413d09478ab4b5cfbafbeea366de2d0c0bcf61deddaa521f6020460fd547ab37659ae207968b545727beba0a3c5572b9c", hex(aggSig2.toBytes()));
     }
 
     @Test

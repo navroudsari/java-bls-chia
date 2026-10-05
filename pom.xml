@@ -102,7 +102,8 @@
                 <version>3.16.0</version>
                 <configuration>
                     <compilerArgs>
-                        <arg>-Xlint:all</arg>
+                        <!-- "restricted" flags every FFM native call, which is this library's purpose. -->
+                        <arg>-Xlint:all,-restricted</arg>
                     </compilerArgs>
                 </configuration>
             </plugin>
