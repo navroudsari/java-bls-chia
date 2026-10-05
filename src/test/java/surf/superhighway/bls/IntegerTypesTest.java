@@ -114,7 +114,7 @@ class IntegerTypesTest {
             assertNotNull(in);
             text = new String(in.readAllBytes(), StandardCharsets.US_ASCII);
         }
-        return Arrays.stream(text.split("\n"))
+        return Arrays.stream(text.split("\\R"))
                 .filter(line -> !line.isBlank() && !line.startsWith("#"))
                 .map(line -> DynamicTest.dynamicTest(line.length() > 70 ? line.substring(0, 70) + "…" : line, () -> {
                     String[] tokens = line.split(" ");

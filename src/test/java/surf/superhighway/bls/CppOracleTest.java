@@ -26,7 +26,7 @@ class CppOracleTest {
         try (InputStream in = CppOracleTest.class.getResourceAsStream("/oracle/" + resource)) {
             assertNotNull(in, resource);
             List<String[]> rows = new ArrayList<>();
-            for (String line : new String(in.readAllBytes(), StandardCharsets.US_ASCII).split("\n")) {
+            for (String line : new String(in.readAllBytes(), StandardCharsets.US_ASCII).split("\\R")) {
                 if (!line.isBlank() && !line.startsWith("#")) {
                     rows.add(line.split(",", -1));
                 }

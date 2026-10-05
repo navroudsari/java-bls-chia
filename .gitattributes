@@ -1,0 +1,4 @@
+# Test vectors and shell scripts must keep LF endings on every platform
+# (Windows checkouts otherwise convert them to CRLF).
+src/test/resources/** text eol=lf
+*.sh text eol=lf
